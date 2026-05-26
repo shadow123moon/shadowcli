@@ -1,7 +1,7 @@
 """multi_agent - Multi-Agent 协作系统的 Pythonic 完成版。
 
 对齐 paicli 设计核心：
-- 三角色：PLANNER（规划者）/ WORKER（执行者）/ REVIEWER（检查者）
+- 两类执行角色：PLANNER（规划者）/ WORKER（执行者）
 - 主从架构：Orchestrator 编排，SubAgent 执行
 - 完整 ReAct 循环（Worker 调工具 + 工具结果回灌 + 多轮迭代）
 - AgentBudget 三道防护：token 预算 + 停滞检测 + 硬轮数
@@ -15,16 +15,15 @@
 - messages.py     AgentMessage + MessageType + 静态工厂
 - budget.py       AgentBudget 三道防护
 - sub_agent.py    SubAgent 含完整 ReAct 循环
-- orchestrator.py AgentOrchestrator 编排 + 并行池化 + 重试
+- orchestrator.py AgentOrchestrator 编排 + 并行池化
 
 外部使用示例：
 
     import asyncio
     from multi_agent import AgentOrchestrator
     from memory_pythonic import MemoryManager
-    from llm_client import chat
-    from tool_registry import ToolRegistry
-    from tools import ReadFileTool, WriteFileTool, ListDirTool, ExecuteCommandTool
+    from llm.client import chat
+    from tooling import ExecuteCommandTool, ListDirTool, ReadFileTool, ToolRegistry, WriteFileTool
 
     registry = ToolRegistry()
     for tool in [ReadFileTool(), WriteFileTool(), ListDirTool(), ExecuteCommandTool()]:
@@ -48,7 +47,7 @@
 """
 from .budget import AgentBudget, ExitReason
 from .messages import AgentMessage, MessageType
-from .orchestrator import AgentOrchestrator, ExecutionStep, StepStatus
+from .orchestrator import AgentOrchestrator, ExecutionStep, StepStatus, PlanReviewDecision, parse_plan_review_input
 from .roles import AgentRole
 from .sub_agent import ChatFn, SubAgent
 

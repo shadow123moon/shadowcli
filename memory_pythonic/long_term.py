@@ -109,7 +109,10 @@ class LongTermMemory:
         if not self._path.exists():
             return
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            text = self._path.read_text(encoding="utf-8")
+            if not text.strip():
+                return
+            raw = json.loads(text)
         except (json.JSONDecodeError, OSError) as exc:
             log.warning("长期记忆加载失败: %s", exc)
             return

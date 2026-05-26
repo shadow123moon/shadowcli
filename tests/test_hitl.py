@@ -1,365 +1,381 @@
-"""hitl_pythonic 烟雾测试。
+"""HITL / Reviewer 扩展的测试。
 
-风格与 tests/test_agent_execution.py 一致 —— 用标准库 unittest,不依赖 pytest。
-
-跑法::
-
-    python -m unittest tests.test_hitl -v
+测试范围：
+- extensions.approval_policy 的工具危险判断
+- extensions.hitl 的人工审查 handler（mock input）
+- extensions.reviewer 的 AI 审查 handler（mock chat）
+- extensions.tool_runtime 的 hook 拦截行为
 """
-from __future__ import annotations
-
 import io
-import json
-import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from hitl_pythonic import (
-    ApprovalRequest,
-    ApprovalResult,
-    Decision,
-    TerminalHitlHandler,
-    danger_level,
-    is_mcp_tool,
-    mcp_server_name,
-    requires_approval,
-    with_hitl,
-)
-from tool_registry import ToolRegistry
-from tools import ReadFileTool, WriteFileTool
+from extensions import hitl as hitl_ext
+from extensions import reviewer as reviewer_ext
+from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
+from extensions import approval_policy as policy
+from llm.types import ChatResponse
+from tooling.base import Tool
 
 
-# ---------- policy ----------
+# ---------- 测试辅助：构造假工具 ----------
+class _FakeSafeTool(Tool):
+    approval_required = False
+    approval_level = "🟢 安全"
+    approval_reason = "只读操作"
+
+    @property
+    def name(self):
+        return "read"
+
+    @property
+    def description(self):
+        return "fake"
+
+    @property
+    def parameters(self):
+        return {}
+
+    def execute(self, arguments):
+        return "safe-ok"
+
+
+class _FakeDangerTool(Tool):
+    approval_required = True
+    approval_level = "🔴 高危"
+    approval_reason = "会修改文件"
+
+    @property
+    def name(self):
+        return "write"
+
+    @property
+    def description(self):
+        return "fake"
+
+    @property
+    def parameters(self):
+        return {}
+
+    def execute(self, arguments):
+        return "danger-ok"
+
+
+class _FakeMcpTool(Tool):
+    """没有显式声明 approval_required，靠名字前缀判断。"""
+
+    @property
+    def name(self):
+        return "mcp__chrome__click"
+
+    @property
+    def description(self):
+        return "fake"
+
+    @property
+    def parameters(self):
+        return {}
+
+    def execute(self, arguments):
+        return "mcp-ok"
+
+
+class TestModuleLayout(unittest.TestCase):
+    def test_hitl_pythonic_package_removed(self):
+        root = Path(__file__).resolve().parents[1]
+
+        self.assertFalse((root / "hitl_pythonic").exists())
+
+
+# ---------- policy 模块 ----------
 class TestPolicy(unittest.TestCase):
-    def test_requires_approval_dangerous_tools(self):
-        for name in ("write_file", "execute_command", "create_project", "revert_turn"):
-            self.assertTrue(requires_approval(name), name)
+    def test_safe_tool_not_required(self):
+        self.assertFalse(policy.requires_approval_for_tool(_FakeSafeTool(), {}))
 
-    def test_requires_approval_safe_tools(self):
-        for name in ("read_file", "list_dir", "search_code"):
-            self.assertFalse(requires_approval(name), name)
+    def test_danger_tool_required(self):
+        self.assertTrue(policy.requires_approval_for_tool(_FakeDangerTool(), {}))
 
-    def test_requires_approval_all_mcp_tools(self):
-        self.assertTrue(requires_approval("mcp__chrome__navigate"))
-        self.assertTrue(requires_approval("mcp__github__create_issue"))
+    def test_mcp_tool_required_by_prefix(self):
+        # 没有 requires_approval 方法的对象，靠名字前缀判断
+        class _Bare:
+            name = "mcp__chrome__click"
 
-    def test_mcp_server_name(self):
-        self.assertEqual(mcp_server_name("mcp__chrome__navigate"), "chrome")
-        self.assertEqual(mcp_server_name("mcp__github__x"), "github")
-        self.assertIsNone(mcp_server_name("write_file"))
-        self.assertIsNone(mcp_server_name(None))
-        self.assertIsNone(mcp_server_name(""))
+        self.assertTrue(policy.requires_approval_for_tool(_Bare(), {}))
+
+    def test_mcp_tool_with_method_uses_method(self):
+        # 有 requires_approval 方法的对象，优先使用方法返回值
+        # 这说明：MCP 工具如果继承 Tool 基类，必须显式设 approval_required=True
+        self.assertFalse(policy.requires_approval_for_tool(_FakeMcpTool(), {}))
+
+    def test_danger_level_uses_tool_attr(self):
+        self.assertEqual(policy.danger_level_for_tool(_FakeDangerTool()), "🔴 高危")
+
+    def test_danger_level_fallback_safe(self):
+        # 普通工具没声明 approval_level 时（这里 _FakeSafeTool 声明了）
+        # 用空 tool 测 fallback
+        class _Empty:
+            name = "read"
+
+        self.assertEqual(policy.danger_level_for_tool(_Empty()), policy.DEFAULT_SAFE_LEVEL)
+
+    def test_danger_level_fallback_mcp(self):
+        class _Empty:
+            name = "mcp__chrome__click"
+
+        self.assertEqual(policy.danger_level_for_tool(_Empty()), policy.MCP_LEVEL)
+
+    def test_risk_description_uses_tool_attr(self):
+        self.assertEqual(
+            policy.risk_description_for_tool(_FakeDangerTool()),
+            "会修改文件",
+        )
 
     def test_is_mcp_tool(self):
-        self.assertTrue(is_mcp_tool("mcp__x__y"))
-        self.assertFalse(is_mcp_tool("write_file"))
-        self.assertFalse(is_mcp_tool(None))
+        self.assertTrue(policy.is_mcp_tool("mcp__chrome__click"))
+        self.assertFalse(policy.is_mcp_tool("write"))
+        self.assertFalse(policy.is_mcp_tool(""))
+        self.assertFalse(policy.is_mcp_tool(None))
 
-    def test_danger_level(self):
-        self.assertIn("高危", danger_level("execute_command"))
-        self.assertIn("高危", danger_level("revert_turn"))
-        self.assertIn("中危", danger_level("write_file"))
-        self.assertIn("MCP", danger_level("mcp__x__y"))
-        self.assertIn("安全", danger_level("read_file"))
-
-
-# ---------- ApprovalResult ----------
-class TestApprovalResult(unittest.TestCase):
-    def test_approve(self):
-        r = ApprovalResult.approve()
-        self.assertTrue(r.is_approved)
-        self.assertFalse(r.is_rejected)
-        self.assertFalse(r.is_skipped)
-
-    def test_reject_carries_reason(self):
-        r = ApprovalResult.reject("不安全")
-        self.assertTrue(r.is_rejected)
-        self.assertEqual(r.reason, "不安全")
-        self.assertFalse(r.is_approved)
-
-    def test_skip(self):
-        r = ApprovalResult.skip()
-        self.assertTrue(r.is_skipped)
-        self.assertFalse(r.is_approved)
-
-    def test_modify_effective_arguments_returns_new(self):
-        r = ApprovalResult.modify({"a": 2})
-        self.assertTrue(r.is_approved)
-        self.assertEqual(r.effective_arguments({"a": 1}), {"a": 2})
-
-    def test_approve_effective_arguments_returns_original(self):
-        r = ApprovalResult.approve()
-        self.assertEqual(r.effective_arguments({"a": 1}), {"a": 1})
-
-    def test_approve_all_kinds(self):
-        self.assertTrue(ApprovalResult.approve_all().is_approved_all_by_tool)
-        self.assertTrue(
-            ApprovalResult.approve_all_by_server().is_approved_all_by_server
-        )
+    def test_mcp_server_name(self):
+        self.assertEqual(policy.mcp_server_name("mcp__chrome__click"), "chrome")
+        self.assertIsNone(policy.mcp_server_name("write"))
+        self.assertIsNone(policy.mcp_server_name("mcp__"))
 
 
-# ---------- ApprovalRequest ----------
-class TestApprovalRequest(unittest.TestCase):
-    def test_display_text_essentials(self):
-        req = ApprovalRequest(
-            tool_name="write_file",
-            arguments={"path": "/tmp/x.txt", "content": "hello"},
-            suggestion="测试覆盖到边角",
-        )
-        text = req.to_display_text()
-        self.assertIn("需要审批", text)
-        self.assertIn("write_file", text)
-        self.assertIn("中危", text)
-        self.assertIn("执行理由", text)
-        self.assertIn("/tmp/x.txt", text)
+# ---------- HITL 扩展 ----------
+class TestHitlExtension(unittest.TestCase):
+    def test_safe_tool_skipped(self):
+        # 安全工具不应弹审查
+        result = hitl_ext.hitl_handler("read", {}, _FakeSafeTool())
+        self.assertIsNone(result)
 
-    def test_display_text_truncates_long_content(self):
-        req = ApprovalRequest(
-            tool_name="write_file",
-            arguments={"path": "/tmp/x", "content": "a" * 500},
-        )
-        self.assertIn("500 字符", req.to_display_text())
-
-    def test_display_text_mcp_shows_server(self):
-        req = ApprovalRequest(
-            tool_name="mcp__chrome__navigate",
-            arguments={"url": "https://example.com"},
-        )
-        text = req.to_display_text()
-        self.assertIn("MCP server", text)
-        self.assertIn("chrome", text)
-
-    def test_display_text_empty_args(self):
-        req = ApprovalRequest(tool_name="execute_command", arguments={})
-        self.assertIn("无参数", req.to_display_text())
-
-
-# ---------- TerminalHitlHandler ----------
-def _terminal(inputs: list[str]) -> tuple[TerminalHitlHandler, io.StringIO]:
-    payload = "\n".join(inputs) + "\n" if inputs else ""
-    stdin = io.StringIO(payload)
-    stdout = io.StringIO()
-    return TerminalHitlHandler(enabled=True, stdin=stdin, stdout=stdout), stdout
-
-
-def _write_request() -> ApprovalRequest:
-    return ApprovalRequest(
-        tool_name="write_file",
-        arguments={"path": "/tmp/x", "content": "hi"},
-    )
-
-
-class TestTerminalHandler(unittest.TestCase):
     def test_approve_with_y(self):
-        handler, _ = _terminal(["y"])
-        self.assertIs(handler.request_approval(_write_request()).decision, Decision.APPROVED)
+        with patch("builtins.input", return_value="y"):
+            result = hitl_ext.hitl_handler("write", {"p": "a"}, _FakeDangerTool())
+        self.assertIsNone(result)
 
-    def test_approve_with_enter(self):
-        handler, _ = _terminal([""])
-        self.assertIs(handler.request_approval(_write_request()).decision, Decision.APPROVED)
+    def test_reject_with_n_returns_hard_stop(self):
+        with patch("builtins.input", return_value="n"):
+            result = hitl_ext.hitl_handler("write", {"p": "a"}, _FakeDangerTool())
+        self.assertIsNotNone(result)
+        self.assertTrue(result["block"])
+        self.assertTrue(result["hard_stop"])
+        self.assertIn("拒绝", result["reason"])
 
-    def test_reject_with_reason(self):
-        handler, _ = _terminal(["n", "怕被覆盖"])
-        result = handler.request_approval(_write_request())
-        self.assertIs(result.decision, Decision.REJECTED)
-        self.assertEqual(result.reason, "怕被覆盖")
+    def test_correction_with_c_returns_soft_block(self):
+        # "c" 是建议修改：block=True 但 hard_stop=False
+        inputs = iter(["c", "请用 edit 而不是 write"])
+        with patch("builtins.input", side_effect=lambda *_: next(inputs)):
+            result = hitl_ext.hitl_handler("write", {"p": "a"}, _FakeDangerTool())
+        self.assertTrue(result["block"])
+        self.assertFalse(result["hard_stop"])
+        self.assertIn("请用 edit", result["reason"])
 
-    def test_skip(self):
-        handler, _ = _terminal(["s"])
-        self.assertIs(handler.request_approval(_write_request()).decision, Decision.SKIPPED)
-
-    def test_modify_with_valid_json(self):
-        new_args = json.dumps({"path": "/tmp/y", "content": "hi"})
-        handler, _ = _terminal(["m", new_args])
-        result = handler.request_approval(_write_request())
-        self.assertIs(result.decision, Decision.MODIFIED)
-        self.assertEqual(result.modified_arguments, {"path": "/tmp/y", "content": "hi"})
-
-    def test_modify_invalid_then_approve(self):
-        handler, stdout = _terminal(["m", "not json at all", "y"])
-        result = handler.request_approval(_write_request())
-        self.assertIs(result.decision, Decision.APPROVED)
-        self.assertIn("不是合法 JSON", stdout.getvalue())
-
-    def test_modify_empty_falls_back_to_approve(self):
-        handler, stdout = _terminal(["m", ""])
-        result = handler.request_approval(_write_request())
-        self.assertIs(result.decision, Decision.APPROVED)
-        self.assertIn("改为批准原始参数", stdout.getvalue())
-
-    def test_approve_all_caches_tool(self):
-        handler, _ = _terminal(["a"])
-        result = handler.request_approval(_write_request())
-        self.assertIs(result.decision, Decision.APPROVED_ALL)
-        self.assertTrue(handler.is_approved_all_by_tool("write_file"))
-
-    def test_approve_all_mcp_server_scope(self):
-        req = ApprovalRequest(tool_name="mcp__chrome__click", arguments={"x": 1})
-        handler, _ = _terminal(["a", "server"])
-        result = handler.request_approval(req)
-        self.assertIs(result.decision, Decision.APPROVED_ALL_BY_SERVER)
-        self.assertTrue(handler.is_approved_all_by_server("chrome"))
-
-    def test_approve_all_mcp_default_scope_is_tool(self):
-        req = ApprovalRequest(tool_name="mcp__chrome__click", arguments={"x": 1})
-        handler, _ = _terminal(["a", ""])
-        result = handler.request_approval(req)
-        self.assertIs(result.decision, Decision.APPROVED_ALL)
-        self.assertTrue(handler.is_approved_all_by_tool("mcp__chrome__click"))
-        self.assertFalse(handler.is_approved_all_by_server("chrome"))
-
-    def test_second_call_auto_passes_after_approve_all(self):
-        handler, stdout = _terminal(["a"])
-        handler.request_approval(_write_request())
-        # 第二次不应再读取 stdin
-        result2 = handler.request_approval(_write_request())
-        self.assertIs(result2.decision, Decision.APPROVED_ALL)
-        self.assertIn("自动通过", stdout.getvalue())
-
-    def test_eof_treated_as_reject(self):
-        handler, _ = _terminal([])
-        self.assertIs(handler.request_approval(_write_request()).decision, Decision.REJECTED)
-
-    def test_invalid_input_5_times_then_reject(self):
-        handler, _ = _terminal(["?", "?", "?", "?", "?"])
-        self.assertIs(handler.request_approval(_write_request()).decision, Decision.REJECTED)
-
-    def test_sensitive_disables_approve_all(self):
-        req = ApprovalRequest(
-            tool_name="mcp__chrome__click",
-            arguments={"x": 1},
-            sensitive_notice="登录页面，操作要小心",
-        )
-        handler, stdout = _terminal(["a", "y"])
-        result = handler.request_approval(req)
-        self.assertIs(result.decision, Decision.APPROVED)
-        self.assertIn("敏感页面操作不支持全部放行", stdout.getvalue())
-
-    def test_clear_approved_all(self):
-        handler, _ = _terminal(["a"])
-        handler.request_approval(_write_request())
-        self.assertTrue(handler.is_approved_all_by_tool("write_file"))
-        handler.clear_approved_all()
-        self.assertFalse(handler.is_approved_all_by_tool("write_file"))
+    def test_correction_with_empty_advice(self):
+        inputs = iter(["c", ""])
+        with patch("builtins.input", side_effect=lambda *_: next(inputs)):
+            result = hitl_ext.hitl_handler("write", {"p": "a"}, _FakeDangerTool())
+        self.assertTrue(result["block"])
+        self.assertFalse(result["hard_stop"])
+        self.assertIn("未提供补充说明", result["reason"])
 
 
-# ---------- HitlToolRegistry / with_hitl ----------
-class _StubAutoApprove:
-    def __init__(self) -> None:
-        self.enabled = True
-        self.calls = 0
-
-    def request_approval(self, request):
-        self.calls += 1
-        return ApprovalResult.approve()
-
-    def is_approved_all_by_tool(self, tool_name): return False
-    def is_approved_all_by_server(self, server_name): return False
-    def clear_approved_all(self): pass
+# ---------- Reviewer 扩展 ----------
+def _fake_chat(content: str):
+    return lambda messages, **kwargs: ChatResponse(content=content)
 
 
-class _StubAutoReject:
-    def __init__(self) -> None:
-        self.enabled = True
-        self.calls = 0
+class TestReviewerExtension(unittest.TestCase):
+    def test_safe_tool_skipped(self):
+        # 安全工具不调 LLM，直接放行
+        with patch("extensions.reviewer.chat") as mocked:
+            result = reviewer_ext.reviewer_handler("read", {}, _FakeSafeTool())
+        self.assertIsNone(result)
+        mocked.assert_not_called()
 
-    def request_approval(self, request):
-        self.calls += 1
-        return ApprovalResult.reject("策略拒绝")
+    def test_llm_approves(self):
+        with patch(
+            "extensions.reviewer.chat",
+            side_effect=_fake_chat('{"approved": true, "reason": "安全"}'),
+        ):
+            result = reviewer_ext.reviewer_handler(
+                "write", {"p": "a"}, _FakeDangerTool()
+            )
+        self.assertIsNone(result)
 
-    def is_approved_all_by_tool(self, tool_name): return False
-    def is_approved_all_by_server(self, server_name): return False
-    def clear_approved_all(self): pass
+    def test_llm_rejects(self):
+        with patch(
+            "extensions.reviewer.chat",
+            side_effect=_fake_chat('{"approved": false, "reason": "路径可疑"}'),
+        ):
+            result = reviewer_ext.reviewer_handler(
+                "write", {"p": "/etc/passwd"}, _FakeDangerTool()
+            )
+        self.assertTrue(result["block"])
+        self.assertEqual(result["reason"], "路径可疑")
+
+    def test_llm_returns_json_wrapped_in_text(self):
+        # LLM 有时会在 JSON 前后加自然语言
+        with patch(
+            "extensions.reviewer.chat",
+            side_effect=_fake_chat(
+                '好的，我判断如下：{"approved": false, "reason": "高风险"} 仅供参考'
+            ),
+        ):
+            result = reviewer_ext.reviewer_handler(
+                "bash", {"command": "rm -rf /"}, _FakeDangerTool()
+            )
+        self.assertTrue(result["block"])
+        self.assertEqual(result["reason"], "高风险")
+
+    def test_llm_error_blocks(self):
+        # 网络异常 / 超时：安全起见拦截
+        with patch(
+            "extensions.reviewer.chat", side_effect=RuntimeError("网络超时")
+        ):
+            result = reviewer_ext.reviewer_handler(
+                "write", {"p": "a"}, _FakeDangerTool()
+            )
+        self.assertTrue(result["block"])
+        self.assertIn("网络超时", result["reason"])
+
+    def test_llm_non_json_blocks(self):
+        # LLM 返回完全不是 JSON：当作异常拦截
+        with patch(
+            "extensions.reviewer.chat", side_effect=_fake_chat("我不知道")
+        ):
+            result = reviewer_ext.reviewer_handler(
+                "write", {"p": "a"}, _FakeDangerTool()
+            )
+        self.assertTrue(result["block"])
 
 
-class TestHitlGate(unittest.TestCase):
+# ---------- ToolRuntime hook 行为 ----------
+class _FakeRegistry:
+    """最小化的 registry stub，只支持 get / execute。"""
+
+    def __init__(self, tools: dict):
+        self._tools = tools
+
+    def get(self, name):
+        return self._tools[name]
+
+    def execute(self, name, arguments):
+        return self._tools[name].execute(arguments)
+
+    def get_all_definitions(self):
+        return []
+
+
+class TestToolRuntimeHooks(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    def _make_gate(self, handler, audit=None):
-        base = ToolRegistry()
-        base.register(WriteFileTool())
-        base.register(ReadFileTool())
-        return with_hitl(base, handler, audit), base
-
-    def test_skips_approval_when_disabled(self):
-        stub = _StubAutoReject()
-        stub.enabled = False
-        gate, _ = self._make_gate(stub)
-        f = self.tmp_path / "x.txt"
-        gate.execute("write_file", {"path": str(f), "content": "ok"})
-        self.assertEqual(f.read_text(encoding="utf-8"), "ok")
-        self.assertEqual(stub.calls, 0)
-
-    def test_skips_approval_for_safe_tool(self):
-        stub = _StubAutoReject()
-        f = self.tmp_path / "x.txt"
-        f.write_text("hello", encoding="utf-8")
-        gate, _ = self._make_gate(stub)
-        self.assertEqual(gate.execute("read_file", {"path": str(f)}), "hello")
-        self.assertEqual(stub.calls, 0)
-
-    def test_executes_when_approved(self):
-        stub = _StubAutoApprove()
-        gate, _ = self._make_gate(stub)
-        f = self.tmp_path / "x.txt"
-        gate.execute("write_file", {"path": str(f), "content": "ok"})
-        self.assertEqual(f.read_text(encoding="utf-8"), "ok")
-        self.assertEqual(stub.calls, 1)
-
-    def test_blocks_when_rejected(self):
-        stub = _StubAutoReject()
-        gate, _ = self._make_gate(stub)
-        f = self.tmp_path / "x.txt"
-        out = gate.execute("write_file", {"path": str(f), "content": "ok"})
-        self.assertTrue(out.startswith("[HITL] 操作已被拒绝"))
-        self.assertFalse(f.exists())
-
-    def test_calls_audit_hook(self):
-        captured = []
-
-        def audit(name, args, result, reason):
-            captured.append((name, result.decision, reason))
-
-        gate, _ = self._make_gate(_StubAutoReject(), audit=audit)
-        gate.execute(
-            "write_file",
-            {"path": str(self.tmp_path / "y"), "content": "x"},
+        self.registry = _FakeRegistry(
+            {
+                "read": _FakeSafeTool(),
+                "write": _FakeDangerTool(),
+            }
         )
-        self.assertEqual(len(captured), 1)
-        self.assertIs(captured[0][1], Decision.REJECTED)
-        self.assertEqual(captured[0][2], "策略拒绝")
+        self.runtime = ToolRuntime(self.registry)
 
-    def test_modify_uses_new_args(self):
-        target_y = self.tmp_path / "y.txt"
-        target_x = self.tmp_path / "x.txt"
+    def test_no_hooks_executes_normally(self):
+        self.assertEqual(self.runtime.execute("read", {}), "safe-ok")
+        self.assertEqual(self.runtime.execute("write", {}), "danger-ok")
 
-        class _ModifyToY:
-            enabled = True
+    def test_hook_returns_none_lets_through(self):
+        self.runtime.on_before_execute(lambda name, args, tool: None)
+        self.assertEqual(self.runtime.execute("write", {}), "danger-ok")
 
-            def request_approval(self, request):
-                new = dict(request.arguments)
-                new["path"] = str(target_y)
-                return ApprovalResult.modify(new)
+    def test_hook_soft_block_returns_message(self):
+        self.runtime.on_before_execute(
+            lambda *_: {"block": True, "hard_stop": False, "reason": "建议改用 edit"}
+        )
+        out = self.runtime.execute("write", {})
+        self.assertIn("建议改用 edit", out)
+        self.assertIn("操作被拒绝", out)
 
-            def is_approved_all_by_tool(self, name): return False
-            def is_approved_all_by_server(self, name): return False
-            def clear_approved_all(self): pass
+    def test_hook_hard_block_raises(self):
+        self.runtime.on_before_execute(
+            lambda *_: {"block": True, "hard_stop": True, "reason": "禁止"}
+        )
+        with self.assertRaises(ToolExecutionBlocked) as ctx:
+            self.runtime.execute("write", {})
+        self.assertIn("禁止", str(ctx.exception))
 
-        gate, _ = self._make_gate(_ModifyToY())
-        gate.execute("write_file", {"path": str(target_x), "content": "ok"})
-        self.assertEqual(target_y.read_text(encoding="utf-8"), "ok")
-        self.assertFalse(target_x.exists())
+    def test_hard_stop_defaults_to_true(self):
+        # 不显式设置 hard_stop，默认应该是硬停（保守）
+        self.runtime.on_before_execute(
+            lambda *_: {"block": True, "reason": "禁止"}
+        )
+        with self.assertRaises(ToolExecutionBlocked):
+            self.runtime.execute("write", {})
 
-    def test_forwards_get_and_definitions(self):
-        gate, base = self._make_gate(_StubAutoApprove())
-        self.assertIs(gate.get("write_file"), base.get("write_file"))
-        defs = gate.get_all_definitions()
-        self.assertTrue(any(d["function"]["name"] == "write_file" for d in defs))
+    def test_multiple_hooks_first_block_wins(self):
+        calls = []
+
+        def hook1(*_):
+            calls.append("h1")
+            return {"block": True, "hard_stop": True, "reason": "h1 拒绝"}
+
+        def hook2(*_):
+            calls.append("h2")
+            return None
+
+        self.runtime.on_before_execute(hook1)
+        self.runtime.on_before_execute(hook2)
+
+        with self.assertRaises(ToolExecutionBlocked):
+            self.runtime.execute("write", {})
+
+        # hook2 不应被调用，因为 hook1 已经拦截
+        self.assertEqual(calls, ["h1"])
+
+    def test_hook_receives_tool_object(self):
+        captured = {}
+
+        def hook(name, args, tool):
+            captured["name"] = name
+            captured["args"] = args
+            captured["tool_name"] = tool.name
+            return None
+
+        self.runtime.on_before_execute(hook)
+        self.runtime.execute("write", {"path": "x"})
+        self.assertEqual(captured["name"], "write")
+        self.assertEqual(captured["args"], {"path": "x"})
+        self.assertEqual(captured["tool_name"], "write")
+
+
+# ---------- 集成：扩展 register 到 runtime ----------
+class TestExtensionRegistration(unittest.TestCase):
+    def setUp(self):
+        self.registry = _FakeRegistry(
+            {
+                "read": _FakeSafeTool(),
+                "write": _FakeDangerTool(),
+            }
+        )
+        self.runtime = ToolRuntime(self.registry)
+
+    def test_hitl_register_blocks_on_reject(self):
+        hitl_ext.register(self.runtime)
+        with patch("builtins.input", return_value="n"):
+            with self.assertRaises(ToolExecutionBlocked):
+                self.runtime.execute("write", {})
+
+    def test_hitl_register_passes_safe_tool(self):
+        hitl_ext.register(self.runtime)
+        # 不会触发 input，因为是安全工具
+        self.assertEqual(self.runtime.execute("read", {}), "safe-ok")
+
+    def test_reviewer_register_blocks_raises(self):
+        reviewer_ext.register(self.runtime)
+        with patch(
+            "extensions.reviewer.chat",
+            side_effect=_fake_chat('{"approved": false, "reason": "危险"}'),
+        ):
+            with self.assertRaises(ToolExecutionBlocked):
+                self.runtime.execute("write", {})
 
 
 if __name__ == "__main__":

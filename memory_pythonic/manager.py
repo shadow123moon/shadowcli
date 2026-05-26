@@ -17,22 +17,34 @@ from typing import TYPE_CHECKING
 
 from .budget import ContextProfile, TokenBudget
 from .compress import ChatFn, compact_history, compress_memory
-from .entry import MemoryEntry, MemoryType
+from .entry import MemoryEntry, MemoryType, estimate_tokens
 from .long_term import LongTermMemory
-from .retrieval import build_context, search
+from .retrieval import search, search_long_only
 from .short_term import ConversationMemory
 
 if TYPE_CHECKING:
-    from model import Message
+    from llm import Message
 
 log = logging.getLogger(__name__)
 
 MAX_TOOL_RESULT_CHARS = 500
+DEFAULT_MEMORY_CONTEXT_TOKENS = 800
+DEFAULT_RECENT_SHORT_TERM_LIMIT = 8
+DEFAULT_LONG_TERM_LIMIT = 8
+
+
+def _source_label(source: str | None) -> str:
+    return {
+        "user": "用户",
+        "assistant": "助手",
+        "tool": "工具",
+        "fact": "事实",
+    }.get(source or "", source or "未知")
 
 
 def _default_chat() -> ChatFn:
     """延迟加载默认 chat 函数。"""
-    from llm_client import chat
+    from llm.client import chat
     return chat
 
 
@@ -99,12 +111,19 @@ class MemoryManager:
 
     def remember(self, fact: str) -> None:
         """保存稳定事实到长期记忆。"""
+        before = len(self.long_term)
         self.long_term.store(MemoryEntry(
             id=f"fact-{uuid.uuid4().hex[:8]}",
             content=fact,
             type=MemoryType.FACT,
             metadata={"source": "fact"},
         ))
+        log.info(
+            "[记忆-长期] 写入事实，内容 %d 字；当前长期记忆 %d 条%s",
+            len(fact or ""),
+            len(self.long_term),
+            "（重复，未新增）" if len(self.long_term) == before else "",
+        )
 
     def _add(
         self,
@@ -113,12 +132,22 @@ class MemoryManager:
         mtype: MemoryType,
         metadata: dict[str, str],
     ) -> None:
-        self.short_term.store(MemoryEntry(
+        entry = MemoryEntry(
             id=f"{prefix}-{uuid.uuid4().hex[:8]}",
             content=content,
             type=mtype,
             metadata=metadata,
-        ))
+        )
+        self.short_term.store(entry)
+        log.info(
+            "[记忆-短期] 写入%s消息，类型=%s，内容 %d 字；当前 %d 条，%d/%d tokens",
+            _source_label(metadata.get("source", prefix)),
+            mtype.name,
+            len(content or ""),
+            len(self.short_term),
+            self.short_term.total_tokens,
+            self.short_term.max_tokens,
+        )
         self.maybe_compress()
 
     # —— 检索 ——
@@ -126,9 +155,63 @@ class MemoryManager:
         """从短期 + 长期中按相关度检索。"""
         return search(self.short_term, self.long_term, query, limit=limit)
 
-    def context_for(self, query: str, *, max_tokens: int = 500) -> str:
-        """构造用于注入 LLM system prompt 的相关长期记忆片段。"""
-        return build_context(self.long_term, query, max_tokens=max_tokens)
+    def context_for(
+        self,
+        query: str = "",
+        *,
+        max_tokens: int = DEFAULT_MEMORY_CONTEXT_TOKENS,
+        recent_limit: int = DEFAULT_RECENT_SHORT_TERM_LIMIT,
+        long_term_limit: int = DEFAULT_LONG_TERM_LIMIT,
+    ) -> str:
+        """构造用于注入 LLM 的短期最近对话 + 长期事实片段。"""
+        lines = [
+            "## 记忆上下文",
+            "以下是记忆中保存的历史信息，仅在当前用户明确需要时使用；",
+            "如果用户没有明确要求继续或修改之前任务，不要主动继续历史任务。",
+            "",
+        ]
+        used = 0
+        seen: set[str] = set()
+        counts = {"短期": 0, "长期": 0}
+
+        def append_entries(title: str, entries: list[MemoryEntry], origin: str | None = None) -> None:
+            nonlocal used
+            section_lines: list[str] = []
+            for entry in entries:
+                if entry.id in seen:
+                    continue
+                label_origin = origin or ("长期" if entry.id in self.long_term else "短期")
+                label_source = entry.metadata.get("source") or entry.type.name.lower()
+                line = f"- [{label_origin}/{label_source}] {entry.content}"
+                token_count = entry.token_count or estimate_tokens(entry.content)
+                if used + token_count > max_tokens:
+                    break
+                section_lines.append(line)
+                seen.add(entry.id)
+                counts[label_origin] = counts.get(label_origin, 0) + 1
+                used += token_count
+            if section_lines:
+                lines.append(title)
+                lines.extend(section_lines)
+                lines.append("")
+
+        recent_short = list(self.short_term)[-recent_limit:]
+        append_entries("### 最近短期记忆", recent_short, "短期")
+        long_term_entries = search_long_only(self.long_term, query, limit=long_term_limit)
+        append_entries("### 相关长期记忆", long_term_entries, "长期")
+
+        context = "\n".join(lines).rstrip() if seen else ""
+        log.info(
+            "[记忆] 构造直接上下文%s：查询 %d 字，包含 %d 条（短期 %d，长期 %d），约 %d tokens，生成 %d 字",
+            "成功" if context else "为空",
+            len(query or ""),
+            len(seen),
+            counts.get("短期", 0),
+            counts.get("长期", 0),
+            used,
+            len(context),
+        )
+        return context
 
     # —— Token 统计 ——
     def record_usage(self, input_tokens: int, output_tokens: int, *, cached: int = 0) -> None:
@@ -140,20 +223,29 @@ class MemoryManager:
         if not self.budget.needs_compression(
             self.short_term, self._profile.compression_trigger
         ):
+            log.debug(
+                "[记忆-短期] 暂不压缩：当前 %d tokens，触发阈值 %.0f%%",
+                self.short_term.total_tokens,
+                self._profile.compression_trigger * 100,
+            )
             return False
 
         before = self.short_term.total_tokens
         log.info(
-            "short-term compress triggered at %.0f%%",
+            "[记忆-短期] 开始压缩：当前 %d tokens，触发阈值 %.0f%%",
+            before,
             self._profile.compression_trigger * 100,
         )
         summary = compress_memory(self.short_term, self.chat)
         if summary:
             log.info(
-                "short-term compressed: %d → %d tokens, preview='%s'",
-                before, self.short_term.total_tokens, summary[:100],
+                "[记忆-短期] 压缩完成：%d -> %d tokens，摘要 %d 字",
+                before,
+                self.short_term.total_tokens,
+                len(summary),
             )
             return True
+        log.info("[记忆-短期] 跳过压缩：可压缩条目不足")
         return False
 
     def maybe_compact_history(

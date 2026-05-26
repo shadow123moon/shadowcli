@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .entry import estimate_tokens
 
 if TYPE_CHECKING:
-    from model import Message
+    from llm import Message
 
     from .short_term import ConversationMemory
 

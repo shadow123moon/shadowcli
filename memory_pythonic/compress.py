@@ -24,7 +24,7 @@ from .budget import estimate_messages_tokens
 from .entry import MemoryEntry, MemoryType
 
 if TYPE_CHECKING:
-    from model import Message
+    from llm import Message
 
     from .long_term import LongTermMemory
     from .short_term import ConversationMemory
@@ -109,17 +109,17 @@ MAX_HISTORY_INPUT_CHARS = 60_000
 
 # ---------- 私有：Message 构造助手（延迟 import 避免循环） ----------
 def _system(content: str) -> Message:
-    from model import Message
+    from llm import Message
     return Message(role="system", content=content)
 
 
 def _user(content: str) -> Message:
-    from model import Message
+    from llm import Message
     return Message(role="user", content=content)
 
 
 def _assistant(content: str) -> Message:
-    from model import Message
+    from llm import Message
     return Message(role="assistant", content=content)
 
 

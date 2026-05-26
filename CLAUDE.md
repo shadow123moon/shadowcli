@@ -28,18 +28,18 @@ D:\paicli-main\paicli-main\           ← Java 源码
 
 | 期 | Java 包 | Python 模块 | 状态 |
 |---|---|---|---|
-| 1+2 | `agent/` `plan/` `tool/` `llm/` | `main.py` `agent.py` `planning/` `tools.py` `tool_registry.py` `model.py` `llm_client.py` `config.py` | 骨架完成,有测试 |
+| 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `planning/` `tooling/` `llm/` | 骨架完成,有测试 |
 | 2(细化) | `plan/` | `planning/` (`plan.py` `task.py` `planner.py`) | 已作为唯一 Plan/DAG 实现 |
 | 3 | `memory/` | `memory_pythonic/` (短期/长期/压缩/budget/tokenizer 等) | 骨架完成 |
-| 4 | `rag/` | `rag_pythonic/` (chunk/embedding/store/index/retriever/formatter/tokenizer) | 骨架完成 |
+| 4 | `rag/` | — | 已放弃；本地项目检索改用 read/grep/find/ls |
 | 5 | `agent/` 子代理部分 | `multi_agent/` (orchestrator/sub_agent/roles/messages/budget) | 骨架完成 |
 | 6+ | tui / mcp / lsp / snapshot / hitl / runtime / skill | 未开始 | — |
 
 ## 运行 / 测试
 
 ```bash
-python main.py                          # 入口,跑 PlanExecuteAgent 示例
-python -m pytest tests/                 # 当前只有 test_agent_execution.py
+python -m cli_app                       # 入口,交互式 CLI
+python -m unittest discover -s tests -v # 当前测试入口
 ```
 
 LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `MODEL`)或 `.env`。
@@ -55,10 +55,9 @@ LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `
 
 ## 已知问题(当前快照)
 
-- **pyright 类型错误**主要集中在 `llm_client.py` / `core.py`:根因是 LLM 调用的默认参数写 `None` 但签名声明的是非 Optional `str` / `list`。修法:要么签名加 `| None`,要么默认值改成 `""` / `[]`。
-- `memory_pythonic/tokenizer.py` 和 `rag_pythonic/tokenizer.py` 依赖 `jieba`,未安装时会 `possibly unbound`。可选装:`pip install jieba`,或在使用处加软降级。
-- `tests/test_agent_execution.py` 的 `CaptureRegistry` 没继承 `ToolRegistry`,类型不兼容——是 mock 的设计问题,可以用 `Protocol` 重构。
-- 根目录 `model.py` 已只保留 LLM 消息/响应模型；Plan / Task / Planner 统一放在 `planning/`。
+- LLM 客户端已拆到 `llm/client.py`，消息/响应模型放在 `llm/types.py`。
+- `memory_pythonic/tokenizer.py` 依赖 `jieba`,未安装时会 `possibly unbound`。可选装:`pip install jieba`,或在使用处加软降级。
+- 根目录旧入口/兼容文件已删除；Plan / Task / Planner 统一放在 `planning/`。
 
 ## LSP / 类型检查
 

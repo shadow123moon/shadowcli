@@ -56,8 +56,8 @@ class Planner:
 
     @staticmethod
     def _default_chat(system_prompt: str, user_prompt: str) -> str:
-        from llm_client import chat
-        from model import Message
+        from llm import Message
+        from llm.client import chat
 
         response = chat([
             Message(role="system", content=system_prompt),
