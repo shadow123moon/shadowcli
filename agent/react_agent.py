@@ -1,6 +1,6 @@
 import logging
 
-from cli_app.terminal_ui import (
+from ui import (
     print_cancel_requested,
     print_cancelled,
     print_command_result,

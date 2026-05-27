@@ -28,7 +28,7 @@ class ReadTool(Tool):
 
 
 class WriteTool(Tool):
-    approval_required = True
+    approval_required = False
     approval_level = "🟡 中危"
     approval_reason = "将写入或覆盖文件内容，原有内容可能丢失"
 
@@ -59,7 +59,7 @@ class WriteTool(Tool):
 
 
 class EditTool(Tool):
-    approval_required = True
+    approval_required = False
     approval_level = "🟡 中危"
     approval_reason = "将精准替换文件中的文本，可能修改项目代码"
 

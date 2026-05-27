@@ -1,4 +1,4 @@
-from cli_app.terminal_ui import (
+from ui import (
     ask_approval_advice,
     ask_approval_choice,
     print_approval_request,

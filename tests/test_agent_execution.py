@@ -1,5 +1,6 @@
 import contextlib
 import io
+import inspect
 import logging
 import os
 import tempfile
@@ -10,10 +11,10 @@ from unittest.mock import patch
 import cli_app as cli
 from agent.react_agent import ReactAgent
 from extensions.tool_runtime import ToolExecutionBlocked
-from llm import ChatResponse, FunctionCall, ToolCall
+from llm import ChatResponse, FunctionCall, Message, ToolCall
+from llm.client import StreamEvent
 from memory_pythonic import MemoryManager
 from multi_agent import AgentOrchestrator, AgentRole, ExecutionStep, SubAgent
-from multi_agent.messages import AgentMessage
 from multi_agent.sub_agent import PLANNER_PROMPT, _tool_action, _worker_prompt
 from planning import Plan, Task, TaskType
 from tooling import (
@@ -25,6 +26,7 @@ from tooling import (
     LsTool,
     ReadTool,
     ToolRegistry,
+    WriteFileTool,
     WriteTool,
 )
 
@@ -78,16 +80,13 @@ class ModuleLayoutTests(unittest.TestCase):
 
 
 class ReactAgentTests(unittest.TestCase):
-    def test_runs_single_react_turn_with_injected_chat(self):
+    def test_runs_single_react_turn_with_streaming_chat(self):
         calls = []
+        agent = ReactAgent(CaptureRegistry())
 
-        def fake_chat(messages, tools=None):
-            calls.append((list(messages), tools))
-            return ChatResponse(content="你好，我是 ReAct 助手")
-
-        agent = ReactAgent(CaptureRegistry(), chat=fake_chat)
-
-        result = agent.run("你好")
+        with patch("multi_agent.sub_agent.chat_stream", _stream_content(calls, "你好，我是 ReAct 助手")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = agent.run("你好")
 
         self.assertEqual(result, "你好，我是 ReAct 助手")
         self.assertEqual(calls[0][0][-1].content, "你好")
@@ -95,39 +94,32 @@ class ReactAgentTests(unittest.TestCase):
 
     def test_react_greeting_does_not_receive_tools(self):
         calls = []
+        agent = ReactAgent(_ToolDefinitionRegistry())
 
-        def fake_chat(messages, tools=None):
-            calls.append(tools)
-            return ChatResponse(content="你好")
+        with patch("multi_agent.sub_agent.chat_stream", _stream_content(calls, "你好")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                agent.run("你好")
 
-        agent = ReactAgent(_ToolDefinitionRegistry(), chat=fake_chat)
-
-        agent.run("你好")
-
-        self.assertEqual(calls, [None])
+        self.assertEqual([tools for _, tools in calls], [None])
 
     def test_react_file_task_receives_tools(self):
         calls = []
+        agent = ReactAgent(_ToolDefinitionRegistry())
 
-        def fake_chat(messages, tools=None):
-            calls.append(tools)
-            return ChatResponse(content="可以读取")
+        with patch("multi_agent.sub_agent.chat_stream", _stream_content(calls, "可以读取")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                agent.run("读取 cli_app/runner.py 文件")
 
-        agent = ReactAgent(_ToolDefinitionRegistry(), chat=fake_chat)
-
-        agent.run("读取 cli_app/runner.py 文件")
-
-        self.assertIsNotNone(calls[0])
-        self.assertEqual(calls[0][0]["function"]["name"], "read")
+        self.assertIsNotNone(calls[0][1])
+        self.assertEqual(calls[0][1][0]["function"]["name"], "read")
 
     def test_records_react_turn_in_short_term_memory(self):
-        def fake_chat(messages, tools=None):
-            return ChatResponse(content="记住了")
-
         memory = MemoryManager()
-        agent = ReactAgent(CaptureRegistry(), chat=fake_chat, memory_manager=memory)
+        agent = ReactAgent(CaptureRegistry(), memory_manager=memory)
 
-        agent.run("以后默认用 React")
+        with patch("multi_agent.sub_agent.chat_stream", _stream_content([], "记住了")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                agent.run("以后默认用 React")
 
         contents = [entry.content for entry in memory.short_term]
         self.assertEqual(contents, ["以后默认用 React", "记住了"])
@@ -135,19 +127,17 @@ class ReactAgentTests(unittest.TestCase):
     def test_react_turn_injects_recent_short_term_and_relevant_long_term(self):
         calls = []
 
-        def fake_chat(messages, tools=None):
-            calls.append(list(messages))
-            return ChatResponse(content="按你的偏好来")
-
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryManager(long_term_path=Path(tmp) / "memory.json")
             memory.add_user("项目入口是 cli.py")
             memory.remember("用户偏好：普通输入走 React")
-            agent = ReactAgent(CaptureRegistry(), chat=fake_chat, memory_manager=memory)
+            agent = ReactAgent(CaptureRegistry(), memory_manager=memory)
 
-            agent.run("入口和 React 怎么安排？")
+            with patch("multi_agent.sub_agent.chat_stream", _stream_content(calls, "按你的偏好来")):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    agent.run("入口和 React 怎么安排？")
 
-        prompt = calls[0][-1].content
+        prompt = calls[0][0][-1].content
         self.assertIn("## 记忆上下文", prompt)
         self.assertIn("项目入口是 cli.py", prompt)
         self.assertIn("用户偏好：普通输入走 React", prompt)
@@ -179,21 +169,18 @@ class AgentOrchestratorMemoryTests(unittest.TestCase):
     def test_planner_injects_recent_short_term_and_relevant_long_term(self):
         calls = []
 
-        def fake_chat(messages, tools=None):
-            calls.append(list(messages))
-            return ChatResponse(content='{"steps": []}')
-
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryManager(long_term_path=Path(tmp) / "memory.json")
             memory.add_user("项目入口是 cli.py")
             memory.remember("用户偏好：普通输入走 React")
-            orchestrator = AgentOrchestrator(fake_chat, CaptureRegistry(), memory_manager=memory)
+            orchestrator = AgentOrchestrator(chat=None, tool_registry=CaptureRegistry(), memory_manager=memory)
 
             import asyncio
-            with contextlib.redirect_stdout(io.StringIO()):
-                asyncio.run(orchestrator.run("根据 React 入口规划一下"))
+            with patch("multi_agent.sub_agent.chat_stream", _stream_content(calls, '{"steps": []}')):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    asyncio.run(orchestrator.run("根据 React 入口规划一下"))
 
-        prompt = calls[0][-1].content
+        prompt = calls[0][0][-1].content
         self.assertIn("## 记忆上下文", prompt)
         self.assertIn("项目入口是 cli.py", prompt)
         self.assertIn("用户偏好：普通输入走 React", prompt)
@@ -205,22 +192,28 @@ class AgentOrchestratorPlanTests(unittest.TestCase):
     def test_plan_execution_does_not_call_reviewer(self):
         roles = []
 
-        def fake_chat(messages, tools=None):
+        def fake_stream(messages, tools=None, cancel=None):
             system = messages[0].content
             if "任务规划专家" in system:
                 roles.append("planner")
-                return ChatResponse(content='{"steps": [{"description": "直接分析", "dependencies": []}]}')
+                yield StreamEvent("content", '{"steps": [{"description": "直接分析", "dependencies": []}]}')
+                yield StreamEvent("done", {"reason": "finished"})
+                return
             if "质量检查专家" in system:
                 roles.append("reviewer")
-                return ChatResponse(content='{"approved": false, "issues": ["不应调用"]}')
+                yield StreamEvent("content", '{"approved": false, "issues": ["不应调用"]}')
+                yield StreamEvent("done", {"reason": "finished"})
+                return
             roles.append("worker")
-            return ChatResponse(content="执行完成")
+            yield StreamEvent("content", "执行完成")
+            yield StreamEvent("done", {"reason": "finished"})
 
-        orchestrator = AgentOrchestrator(fake_chat, CaptureRegistry())
+        orchestrator = AgentOrchestrator(chat=None, tool_registry=CaptureRegistry())
 
         import asyncio
-        with contextlib.redirect_stdout(io.StringIO()):
-            result = asyncio.run(orchestrator.run("做一个轻量计划"))
+        with patch("multi_agent.sub_agent.chat_stream", fake_stream):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = asyncio.run(orchestrator.run("做一个轻量计划"))
 
         self.assertEqual(roles, ["planner", "worker"])
         self.assertIn("执行完成", result)
@@ -245,13 +238,57 @@ class AgentOrchestratorPlanTests(unittest.TestCase):
         self.assertIn("不要把多个文件的大规模实现合并成一个步骤", PLANNER_PROMPT)
         self.assertIn("实现和验证应拆成不同步骤", PLANNER_PROMPT)
 
+    def test_planner_prompt_defaults_to_minimal_demo_loop(self):
+        self.assertIn("最小可验证闭环", PLANNER_PROMPT)
+        self.assertIn("不要主动规划安装依赖", PLANNER_PROMPT)
+        self.assertIn("不要规划启动长驻服务", PLANNER_PROMPT)
+        self.assertIn("不要把创建目录单独拆成步骤", PLANNER_PROMPT)
+        self.assertIn("短命令", PLANNER_PROMPT)
+        self.assertIn("MVP", PLANNER_PROMPT)
+
     def test_worker_prompt_limits_scope_and_stops_after_current_step(self):
         prompt = _worker_prompt("")
         self.assertIn("只完成当前步骤描述的范围", prompt)
         self.assertIn("不要主动扩展到后续计划步骤", prompt)
         self.assertIn("关键验证已经通过后，立即输出最终结果", prompt)
 
+    def test_worker_prompt_limits_environment_probe_and_long_running_commands(self):
+        prompt = _worker_prompt("")
+        self.assertIn("环境检查最多执行 1-2 条命令", prompt)
+        self.assertIn("不要运行 pip list", prompt)
+        self.assertIn("不要安装依赖", prompt)
+        self.assertIn("不要启动前台长驻服务", prompt)
+        self.assertIn("conda run -n <环境名>", prompt)
+
+    def test_worker_prompt_avoids_app_run_entrypoint_when_service_not_requested(self):
+        prompt = _worker_prompt("")
+        self.assertIn("不要主动写", prompt)
+        self.assertIn("app.run", prompt)
+        self.assertIn("uvicorn.run", prompt)
+        self.assertIn("暴露 app 对象", prompt)
+
+    def test_worker_prompt_avoids_redundant_file_and_verification_tools(self):
+        prompt = _worker_prompt("")
+        self.assertIn("write 工具会自动创建父目录", prompt)
+        self.assertIn("不要为了创建目录单独调用 bash mkdir", prompt)
+        self.assertIn("不要创建临时测试文件", prompt)
+        self.assertIn("不要在验证成功后再执行 python --version", prompt)
+
 class SubAgentToolLogTests(unittest.TestCase):
+    def test_sub_agent_exposes_only_streaming_execute_entrypoint(self):
+        self.assertFalse(hasattr(SubAgent, "execute_batch"))
+
+    def test_sub_agent_does_not_store_unused_memory_manager(self):
+        agent = SubAgent(
+            "react",
+            AgentRole.REACT,
+            chat=None,
+            tool_registry=CaptureRegistry(),
+        )
+
+        self.assertNotIn("memory_manager", inspect.signature(SubAgent).parameters)
+        self.assertFalse(hasattr(agent, "memory_manager"))
+
     def test_tool_action_truncates_long_command_preview(self):
         long_command = "python -c " + "print('hello world'); " * 10
 
@@ -310,41 +347,66 @@ class SubAgentToolLogTests(unittest.TestCase):
         self.assertIn("执行命令：python --version", output)
         self.assertNotIn("完成，结果", output)
 
+    def test_tool_debug_log_includes_full_result_for_plan_log(self):
+        full_result = "命令输出：" + ("x" * 300) + "FULL_RESULT_TAIL"
+        registry = CaptureRegistry()
+        registry.tools["bash"] = _StubTool(full_result)
+        agent = SubAgent(
+            "worker-1",
+            AgentRole.WORKER,
+            chat=lambda messages, tools=None: ChatResponse(content=""),
+            tool_registry=registry,
+        )
+        tool_call = ToolCall(
+            id="call-bash",
+            function=FunctionCall(
+                name="bash",
+                arguments='{"command": "demo"}',
+            ),
+        )
+
+        with self.assertLogs("multi_agent.sub_agent", level="DEBUG") as logs:
+            agent._exec_one(tool_call)
+
+        self.assertIn("FULL_RESULT_TAIL", "\n".join(logs.output))
+
     def test_tool_log_includes_current_plan_step(self):
         registry = CaptureRegistry()
         registry.tools["write"] = _StubTool("done")
         calls = []
 
-        def fake_chat(messages, tools=None):
-            calls.append(list(messages))
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
             if len(calls) == 1:
-                return ChatResponse(
-                    tool_calls=[
-                        ToolCall(
-                            id="call-write",
-                            function=FunctionCall(
-                                name="write",
-                                arguments='{"path": "demo.txt", "content": "ok"}',
-                            ),
-                        )
-                    ]
+                yield StreamEvent(
+                    "tool_call",
+                    {
+                        "id": "call-write",
+                        "type": "function",
+                        "name": "write",
+                        "arguments": '{"path": "demo.txt", "content": "ok"}',
+                    },
                 )
-            return ChatResponse(content="写完了")
+                yield StreamEvent("done", {"reason": "finished"})
+                return
+            yield StreamEvent("content", "写完了")
+            yield StreamEvent("done", {"reason": "finished"})
 
-        orchestrator = AgentOrchestrator(fake_chat, registry, worker_count=1)
+        orchestrator = AgentOrchestrator(chat=None, tool_registry=registry, worker_count=1)
         step = ExecutionStep(id="step_7", description="写入演示文件")
         output = io.StringIO()
 
         import asyncio
-        with self.assertLogs("multi_agent.sub_agent", level="INFO") as logs:
-            asyncio.run(
-                orchestrator._run_step(
-                    step,
-                    orchestrator.workers[0],
-                    context="",
-                    out=output,
+        with patch("multi_agent.sub_agent.chat_stream", fake_stream):
+            with self.assertLogs("multi_agent.sub_agent", level="INFO") as logs:
+                asyncio.run(
+                    orchestrator.execution.run_step(
+                        step,
+                        orchestrator.workers[0],
+                        context="",
+                        out=output,
+                    )
                 )
-            )
 
         self.assertEqual(step.result, "写完了")
         self.assertIn("[step_7", "\n".join(logs.output))
@@ -380,45 +442,45 @@ class SubAgentToolLogTests(unittest.TestCase):
         self.assertIn("读取文件：cli.py", output)
         self.assertIn("写入文件：demo/main.py，内容 8 字", output)
 
-    def test_bash_result_is_emitted_to_agent_output(self):
+    def test_bash_result_event_can_be_rendered_to_output(self):
         registry = CaptureRegistry()
         registry.tools["bash"] = _StubTool("命令执行失败（退出码 1）\nstderr: boom")
         calls = []
 
-        def fake_chat(messages, tools=None):
-            calls.append(list(messages))
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
             if len(calls) == 1:
-                return ChatResponse(
-                    tool_calls=[
-                        ToolCall(
-                            id="call-bash",
-                            function=FunctionCall(
-                                name="bash",
-                                arguments='{"command": "bad command"}',
-                            ),
-                        )
-                    ]
+                yield StreamEvent(
+                    "tool_call",
+                    {
+                        "id": "call-bash",
+                        "type": "function",
+                        "name": "bash",
+                        "arguments": '{"command": "bad command"}',
+                    },
                 )
-            return ChatResponse(content="收尾")
+                yield StreamEvent("done", {"reason": "finished"})
+                return
+            yield StreamEvent("content", "收尾")
+            yield StreamEvent("done", {"reason": "finished"})
 
         agent = SubAgent(
             "worker-1",
             AgentRole.WORKER,
-            chat=fake_chat,
+            chat=None,
             tool_registry=registry,
         )
 
-        import asyncio
         output = io.StringIO()
-        asyncio.run(
-            agent.execute(
-                AgentMessage.task("orchestrator", "运行命令"),
-                out=output,
-            )
-        )
+        with patch("multi_agent.sub_agent.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="运行命令")))
+        for event in events:
+            if event.type == "tool_result":
+                from ui import print_command_result
+
+                print_command_result(agent.name, event.data["name"], event.data["result"], output)
 
         text = output.getvalue()
-        self.assertIn("🛠️ [worker-1] 调用 1 个工具", text)
         self.assertIn("📤 [worker-1] bash 结果", text)
         self.assertIn("命令执行失败（退出码 1）", text)
 
@@ -426,42 +488,59 @@ class SubAgentToolLogTests(unittest.TestCase):
         registry = _HardRejectRuntime()
         calls = []
 
-        def fake_chat(messages, tools=None):
-            calls.append(list(messages))
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
             if len(calls) > 1:
                 raise AssertionError("硬拒绝后不应继续调用模型")
-            return ChatResponse(
-                tool_calls=[
-                    ToolCall(
-                        id="call-write",
-                        function=FunctionCall(
-                            name="write",
-                            arguments='{"path": "demo.txt", "content": "ok"}',
-                        ),
-                    )
-                ]
+            yield StreamEvent(
+                "tool_call",
+                {
+                    "id": "call-write",
+                    "type": "function",
+                    "name": "write",
+                    "arguments": '{"path": "demo.txt", "content": "ok"}',
+                },
             )
+            yield StreamEvent("done", {"reason": "finished"})
 
         agent = SubAgent(
             "react",
             AgentRole.REACT,
-            chat=fake_chat,
+            chat=None,
             tool_registry=registry,
         )
 
-        import asyncio
-        output = io.StringIO()
-        result = asyncio.run(
-            agent.execute(
-                AgentMessage.task("user", "写文件"),
-                out=output,
-            )
+        with patch("multi_agent.sub_agent.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="写文件")))
+
+        done = [event for event in events if event.type == "done"][-1]
+        tool_result = [event for event in events if event.type == "tool_result"][-1]
+        self.assertEqual(done.data["reason"], "blocked")
+        self.assertIn("用户拒绝", tool_result.data["result"])
+        self.assertEqual(len(calls), 1)
+
+    def test_blocked_tool_call_is_not_logged_as_warning(self):
+        agent = SubAgent(
+            "react",
+            AgentRole.REACT,
+            chat=None,
+            tool_registry=_HardRejectRuntime(),
+        )
+        tool_call = ToolCall(
+            id="call-write",
+            function=FunctionCall(
+                name="write",
+                arguments='{"path": "demo.txt", "content": "ok"}',
+            ),
         )
 
-        self.assertTrue(result.is_error())
-        self.assertIn("用户拒绝", result.content)
-        self.assertEqual(len(calls), 1)
-        self.assertIn("工具调用被拒绝", output.getvalue())
+        with self.assertLogs("multi_agent.sub_agent", level="INFO") as logs:
+            with self.assertRaises(ToolExecutionBlocked):
+                agent._exec_one(tool_call)
+
+        output = "\n".join(logs.output)
+        self.assertIn("被拒绝", output)
+        self.assertNotIn("WARNING", output)
 
 
 class CliAgentTests(unittest.TestCase):
@@ -537,6 +616,20 @@ class CliAgentTests(unittest.TestCase):
 
         self.assertEqual(log_files, [])
 
+    def test_run_once_error_prints_clean_message_without_traceback(self):
+        react = _FailingReactAgent()
+        plan = _StubPlanAgent()
+        output = io.StringIO()
+        errors = io.StringIO()
+
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            cli.run_once(react, plan, "你好")
+
+        text = output.getvalue()
+        self.assertIn("[ERROR] 执行失败: boom", text)
+        self.assertNotIn("Traceback", text)
+        self.assertNotIn("Traceback", errors.getvalue())
+
     def test_plan_log_file_captures_debug_details(self):
         with tempfile.TemporaryDirectory() as tmp:
             with cli.PlanLogSession("测试 debug", Path(tmp)) as session:
@@ -545,6 +638,57 @@ class CliAgentTests(unittest.TestCase):
             content = session.path.read_text(encoding="utf-8")
 
         self.assertIn("这是一条 debug 细节", content)
+        self.assertIn("========== PLAN START ==========", content)
+        self.assertIn("========== PLAN END ==========", content)
+
+    def test_plan_log_file_excludes_third_party_debug_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with cli.PlanLogSession("测试 noise", Path(tmp)) as session:
+                logging.getLogger("multi_agent.demo").debug("保留项目 debug")
+                logging.getLogger("openai._base_client").debug("Request options: noisy")
+                logging.getLogger("httpx").info("HTTP Request: noisy")
+                logging.getLogger("httpcore.http11").debug("receive_response_headers noisy")
+                logging.getLogger("urllib3.connectionpool").debug("POST noisy")
+
+            content = session.path.read_text(encoding="utf-8")
+
+        self.assertIn("保留项目 debug", content)
+        self.assertNotIn("Request options: noisy", content)
+        self.assertNotIn("HTTP Request: noisy", content)
+        self.assertNotIn("receive_response_headers noisy", content)
+        self.assertNotIn("POST noisy", content)
+
+    def test_configure_logging_default_console_hides_info_logs(self):
+        errors = io.StringIO()
+
+        with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PAICLI_LOG_LEVEL", None)
+            os.environ.pop("PAICLI_DEBUG_LOG", None)
+            with contextlib.redirect_stderr(errors):
+                cli.configure_logging()
+                logging.getLogger("tests.console").info("internal info")
+                logging.getLogger("tests.console").warning("visible warning")
+
+        text = errors.getvalue()
+        self.assertNotIn("internal info", text)
+        self.assertIn("visible warning", text)
+
+    def test_configure_logging_writes_debug_file_without_console_noise(self):
+        errors = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.log"
+            with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("PAICLI_LOG_LEVEL", None)
+                os.environ.pop("PAICLI_DEBUG_LOG", None)
+                with contextlib.redirect_stderr(errors):
+                    cli.configure_logging(debug_log_path=debug_path)
+                    logging.getLogger("tests.debug.file").debug("deep debug detail")
+
+            content = debug_path.read_text(encoding="utf-8")
+
+        self.assertIn("deep debug detail", content)
+        self.assertNotIn("deep debug detail", errors.getvalue())
 
     def test_remember_command_writes_long_term_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -589,6 +733,11 @@ class _StubReactAgent:
         return f"react:{user_input}"
 
 
+class _FailingReactAgent:
+    def run(self, user_input):
+        raise RuntimeError("boom")
+
+
 class _StubPlanAgent:
     def __init__(self):
         self.inputs = []
@@ -596,6 +745,33 @@ class _StubPlanAgent:
     async def run(self, user_input):
         self.inputs.append(user_input)
         return f"plan:{user_input}"
+
+
+def _stream_content(calls, content):
+    def fake_stream(messages, tools=None, cancel=None):
+        calls.append((list(messages), tools))
+        yield StreamEvent("content", content)
+        yield StreamEvent("done", {"reason": "finished"})
+
+    return fake_stream
+
+
+@contextlib.contextmanager
+def _isolated_root_logger():
+    root = logging.getLogger()
+    old_handlers = list(root.handlers)
+    old_level = root.level
+    for handler in old_handlers:
+        root.removeHandler(handler)
+    try:
+        yield root
+    finally:
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+            handler.close()
+        for handler in old_handlers:
+            root.addHandler(handler)
+        root.setLevel(old_level)
 
 
 class _StubTool:
@@ -750,6 +926,12 @@ class PiStyleToolTests(unittest.TestCase):
             out = registry.execute("read", {"path": str(path)})
 
         self.assertEqual(out, "ok")
+
+    def test_file_write_tools_do_not_require_approval_by_default(self):
+        self.assertFalse(WriteTool().requires_approval({"path": "demo.txt"}))
+        self.assertFalse(WriteFileTool().requires_approval({"path": "demo.txt"}))
+        self.assertFalse(EditTool().requires_approval({"path": "demo.txt"}))
+        self.assertTrue(BashTool().requires_approval({"command": "python --version"}))
 
 
 if __name__ == "__main__":

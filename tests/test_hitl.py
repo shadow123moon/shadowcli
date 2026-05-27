@@ -187,6 +187,28 @@ def _fake_chat(content: str):
 
 
 class TestReviewerExtension(unittest.TestCase):
+    def test_reviewer_prompt_only_reviews_dangerous_side_effects(self):
+        captured = {}
+
+        def fake_chat(messages, **kwargs):
+            captured["system"] = messages[0].content
+            captured["user"] = messages[1].content
+            return ChatResponse(content='{"approved": true, "reason": "非危险操作"}')
+
+        with patch("extensions.reviewer.chat", side_effect=fake_chat):
+            result = reviewer_ext.reviewer_handler(
+                "bash",
+                {"command": "findstr Flask requirements.txt"},
+                _FakeDangerTool(),
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("只判断", captured["system"])
+        self.assertIn("危险", captured["system"])
+        self.assertIn("不要因为命令可能失败", captured["system"])
+        self.assertIn("语法", captured["system"])
+        self.assertIn("兼容性", captured["system"])
+
     def test_safe_tool_skipped(self):
         # 安全工具不调 LLM，直接放行
         with patch("extensions.reviewer.chat") as mocked:

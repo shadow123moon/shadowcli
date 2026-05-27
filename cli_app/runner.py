@@ -19,7 +19,7 @@ from .constants import BANNER, HELP, MEMORY_COMMAND
 from .factories import build_agent, build_memory, build_plan_agent, build_registry, list_tools
 from .logging_config import configure_logging
 from .plan_logs import PlanLogSession
-from .terminal_ui import print_final_result, print_message
+from ui import print_final_result, print_message
 
 log = logging.getLogger(__name__)
 

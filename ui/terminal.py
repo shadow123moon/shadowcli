@@ -1,3 +1,10 @@
+"""统一的终端输出层。
+
+所有 Agent / 编排器的用户可见输出都走这里，方便：
+- 统一样式
+- 未来切换到事件总线 / TUI 库（rich 等）
+- 避免业务模块反向依赖 cli_app
+"""
 from pathlib import Path
 from typing import TextIO
 

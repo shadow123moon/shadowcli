@@ -18,94 +18,25 @@ Pythonic 要点：
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import threading
-from dataclasses import dataclass, field
-from enum import Enum
 from io import StringIO
-from typing import Callable
 
-from cli_app.terminal_ui import (
+from ui import (
     print_buffer,
-    print_command_result,
-    print_content_delta,
     print_execution_phase,
     print_parallel_batch,
-    print_plan_start,
-    print_plan_steps,
-    print_replan,
-    print_step_cancelled,
-    print_step_done,
-    print_step_failed,
     print_step_skipped,
-    print_step_start,
-    print_tool_start,
 )
+from .execution_phase import ExecutionPhase
+from .plan_types import ExecutionStep, PlanReviewFn, StepStatus
+from .planning_phase import PlanningPhase
 from .roles import AgentRole
 from .sub_agent import ChatFn, SubAgent
 
 log = logging.getLogger(__name__)
 
 DEFAULT_WORKER_COUNT = 2
-
-
-class PlanReviewDecision(Enum):
-    """计划审查决策。"""
-    EXECUTE = "execute"       # 直接执行
-    SUPPLEMENT = "supplement" # 补充要求，重新规划
-    CANCEL = "cancel"         # 取消
-
-
-def parse_plan_review_input(user_input: str) -> tuple[PlanReviewDecision, str]:
-    """解析用户对计划的审查输入。
-
-    - 空字符串 / y / yes / run  → EXECUTE
-    - cancel / esc              → CANCEL
-    - 其他任意文字              → SUPPLEMENT（文字作为补充要求）
-    """
-    trimmed = user_input.strip()
-    if trimmed == "" or trimmed.lower() in ("y", "yes", "run"):
-        return PlanReviewDecision.EXECUTE, ""
-    if trimmed.lower() in ("cancel", "esc"):
-        return PlanReviewDecision.CANCEL, ""
-    return PlanReviewDecision.SUPPLEMENT, trimmed
-
-
-# 计划审查回调：接收 (goal, steps)，返回 (decision, feedback)
-PlanReviewFn = Callable[[str, list["ExecutionStep"]], tuple[PlanReviewDecision, str]]
-
-
-class StepStatus(Enum):
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
-@dataclass
-class ExecutionStep:
-    """执行计划中的一个步骤。"""
-
-    id: str
-    description: str
-    type: str = "COMMAND"
-    dependencies: list[str] = field(default_factory=list)
-    status: StepStatus = StepStatus.PENDING
-    result: str = ""
-
-    @property
-    def is_completed(self) -> bool:
-        return self.status == StepStatus.COMPLETED
-
-    @property
-    def is_pending(self) -> bool:
-        return self.status == StepStatus.PENDING
-
-    @property
-    def is_failed(self) -> bool:
-        return self.status == StepStatus.FAILED
 
 
 class AgentOrchestrator:
@@ -126,7 +57,6 @@ class AgentOrchestrator:
         self.memory_manager = memory_manager
         self.cancel = cancel or threading.Event()
         self.worker_count = max(1, worker_count)
-        self._plan_review_handler = plan_review_handler
 
         self.planner = SubAgent(
             "planner", AgentRole.PLANNER, chat, tool_registry,
@@ -139,6 +69,11 @@ class AgentOrchestrator:
             )
             for i in range(self.worker_count)
         ]
+        self.planning = PlanningPhase(
+            self.planner,
+            plan_review_handler=plan_review_handler,
+        )
+        self.execution = ExecutionPhase(self.cancel)
 
     # —— 主入口 ——
     async def run(self, user_input: str) -> str:
@@ -157,80 +92,10 @@ class AgentOrchestrator:
             log.info("[计划] 任务在开始阶段被取消")
             return "⏹️ 已取消"
 
-        # 1. 规划
-        log.info("[计划] 第一阶段：开始生成执行计划")
-        print_plan_start()
-
-        # 流式执行规划
-        from llm.types import Message
-        plan_content_parts = []
-        task_msg = Message(role="user", content=f"请为以下任务制定执行计划：\n{user_input}")
-        for event in self.planner.execute(task_msg, context=memory_context):
-            if event.type == "content":
-                plan_content_parts.append(event.data)
-                print_content_delta(event.data)
-            elif event.type == "done":
-                reason = event.data.get("reason") if event.data else None
-                if reason == "cancelled":
-                    return "⏹️ 已取消"
-                break
-
-        plan_content = "".join(plan_content_parts)
-        self.planner.clear_history()
-        log.info(
-            "[计划] 第一阶段完成：规划输出 %d 字",
-            len(plan_content),
-        )
-
-        if not plan_content:
-            return "❌ 规划失败：规划者未能生成有效计划"
-
-        # 2. 解析计划 + 审查循环
-        steps = self._parse_plan(plan_content)
-        log.info("[计划] 解析出 %d 个执行步骤", len(steps))
-        if not steps:
-            return f"❌ 规划失败：无法解析执行计划\n原始输出:\n{plan_content}"
-
-        print_plan_steps(self._summarize_steps(steps))
-
-        # 计划审查（如果配置了 handler）
-        if self._plan_review_handler is not None:
-            current_goal = user_input
-            while True:
-                decision, feedback = self._plan_review_handler(current_goal, steps)
-                if decision == PlanReviewDecision.EXECUTE:
-                    break
-                if decision == PlanReviewDecision.CANCEL:
-                    log.info("[计划] 用户取消计划")
-                    return "⏹️ 已取消本次计划执行。"
-                # SUPPLEMENT：补充要求，重新规划
-                log.info("[计划] 用户补充要求：%s", feedback)
-                print_replan()
-                current_goal = f"{user_input}\n补充要求：{feedback}"
-
-                # 流式重新规划
-                replan_content_parts = []
-                replan_task = Message(role="user", content=f"请为以下任务制定执行计划：\n{current_goal}")
-                for event in self.planner.execute(replan_task, context=memory_context):
-                    if event.type == "content":
-                        replan_content_parts.append(event.data)
-                        print_content_delta(event.data)
-                    elif event.type == "done":
-                        reason = event.data.get("reason") if event.data else None
-                        if reason == "cancelled":
-                            return "⏹️ 已取消"
-                        break
-
-                replan_content = "".join(replan_content_parts)
-                self.planner.clear_history()
-
-                if not replan_content:
-                    return "❌ 重新规划失败：规划者未能生成有效计划"
-
-                steps = self._parse_plan(replan_content)
-                if not steps:
-                    return f"❌ 重新规划失败：无法解析执行计划\n原始输出:\n{replan_content}"
-                print_plan_steps(self._summarize_steps(steps), title="📋 新执行计划")
+        planning_result = self.planning.run(user_input, memory_context=memory_context)
+        if not planning_result.ok:
+            return planning_result.error
+        steps = planning_result.steps
 
         # 3. 执行阶段
         log.info("[计划] 第二阶段：开始执行 %d 个步骤", len(steps))
@@ -259,7 +124,7 @@ class AgentOrchestrator:
                 worker = self.workers[single_cursor % len(self.workers)]
                 single_cursor += 1
                 context = self._build_step_context(steps, step, memory_context=memory_context)
-                await self._run_step(step, worker, context, out=None)
+                await self.execution.run_step(step, worker, context, out=None)
                 worker.clear_history()
             else:
                 # 多步：并行 + 缓冲 + 顺序 flush
@@ -296,45 +161,6 @@ class AgentOrchestrator:
     def __len__(self) -> int:
         return 1 + len(self.workers)
 
-    # —— JSON 解析 ——
-    def _parse_plan(self, plan_json: str) -> list[ExecutionStep]:
-        """解析规划者输出的 JSON。容错 + id 重编号。"""
-        try:
-            cleaned = re.sub(r"```json\s*", "", plan_json)
-            cleaned = re.sub(r"```\s*", "", cleaned).strip()
-            data = json.loads(cleaned)
-        except Exception as exc:
-            log.error("[计划] 解析计划 JSON 失败：%s", exc)
-            return []
-
-        # 兼容 steps / tasks 两种字段
-        steps_data = data.get("steps") or data.get("tasks") or []
-        if not isinstance(steps_data, list) or not steps_data:
-            log.warning("[计划] 规划结果里没有 steps/tasks 数组")
-            return []
-
-        # 第一遍：创建并重编号（防止规划者给出不规范的 id）
-        steps: list[ExecutionStep] = []
-        id_mapping: dict[str, str] = {}
-        for i, s in enumerate(steps_data, 1):
-            original_id = str(s.get("id", f"original_{i}"))
-            new_id = f"step_{i}"
-            id_mapping[original_id] = new_id
-            steps.append(ExecutionStep(
-                id=new_id,
-                description=str(s.get("description", "")),
-                type=str(s.get("type", "COMMAND")),
-                dependencies=[],
-            ))
-
-        # 第二遍：把依赖里的旧 id 翻译成新 id
-        for i, s in enumerate(steps_data):
-            deps = s.get("dependencies") or []
-            if isinstance(deps, list):
-                steps[i].dependencies = [id_mapping.get(str(d), str(d)) for d in deps]
-
-        return steps
-
     def _get_executable_steps(self, steps: list[ExecutionStep]) -> list[ExecutionStep]:
         status_map = {s.id: s.status for s in steps}
         return [
@@ -342,85 +168,6 @@ class AgentOrchestrator:
             if s.is_pending
             and all(status_map.get(dep) == StepStatus.COMPLETED for dep in s.dependencies)
         ]
-
-    # —— 步骤执行 ——
-    async def _run_step(
-        self,
-        step: ExecutionStep,
-        worker: SubAgent,
-        context: str,
-        *,
-        out: StringIO | None,
-    ) -> None:
-        """执行单步：Worker 流式执行后直接记录结果。"""
-        log.info(
-            "[计划] 开始步骤 %s，执行器=%s，依赖 %d 个",
-            step.id,
-            worker.name,
-            len(step.dependencies),
-        )
-        print_step_start(worker.name, step.id, step.description, out)
-        if self.cancel.is_set():
-            step.status = StepStatus.FAILED
-            step.result = "用户取消"
-            log.info("[计划] 步骤 %s 被取消", step.id)
-            return
-        worker._current_step_label = f"{step.id} {step.description}"
-
-        # 流式执行
-        from llm.types import Message
-        content_parts = []
-        task_msg = Message(role="user", content=step.description)
-
-        try:
-            for event in worker.execute(task_msg, context=context):
-                if self.cancel.is_set():
-                    step.status = StepStatus.FAILED
-                    step.result = "用户取消"
-                    log.info("[计划] 步骤 %s 被取消", step.id)
-                    return
-
-                if event.type == "content":
-                    content_parts.append(event.data)
-                    print_content_delta(event.data, out)
-                elif event.type == "tool_call_start":
-                    print_tool_start(event.data["name"], out)
-                elif event.type == "tool_result":
-                    print_command_result(worker.name, event.data["name"], event.data["result"], out)
-                elif event.type == "done":
-                    reason = event.data.get("reason") if event.data else None
-                    if reason == "cancelled":
-                        step.status = StepStatus.FAILED
-                        step.result = "用户取消"
-                        print_step_cancelled(step.id, out)
-                        log.info("[计划] 步骤 %s 被取消", step.id)
-                        return
-                    elif reason == "blocked":
-                        step.status = StepStatus.FAILED
-                        step.result = "工具调用被拒绝"
-                        print_step_failed(step.id, "工具调用被拒绝", out)
-                        log.info("[计划] 步骤 %s 执行失败：工具调用被拒绝", step.id)
-                        return
-                    break
-
-            result = "".join(content_parts)
-            if not result:
-                step.status = StepStatus.FAILED
-                step.result = "执行结果为空"
-                print_step_failed(step.id, "结果为空", out)
-                log.info("[计划] 步骤 %s 执行失败：结果为空", step.id)
-                return
-
-            step.status = StepStatus.COMPLETED
-            step.result = result
-            print_step_done(step.id, out)
-            log.info("[计划] 步骤 %s 完成", step.id)
-
-        except Exception as exc:
-            step.status = StepStatus.FAILED
-            step.result = f"执行失败: {exc}"
-            print_step_failed(step.id, str(exc), out)
-            log.error("[计划] 步骤 %s 执行失败：%s", step.id, exc)
 
     async def _run_batch_parallel(
         self,
@@ -457,7 +204,7 @@ class AgentOrchestrator:
                     context = self._build_step_context(
                         all_steps, step, memory_context=memory_context
                     )
-                    await self._run_step(
+                    await self.execution.run_step(
                         step, worker, context,
                         out=buffers[step.id],
                     )
@@ -498,14 +245,6 @@ class AgentOrchestrator:
                 lines.append(f"已完成的依赖步骤 [{s.id}]: {s.description}")
                 if preview:
                     lines.append(f"结果：{preview}\n")
-        return "\n".join(lines)
-
-    def _summarize_steps(self, steps: list[ExecutionStep]) -> str:
-        lines = []
-        for s in steps:
-            deps = ", ".join(s.dependencies) if s.dependencies else "无"
-            icon = "✅" if s.is_completed else "⏳"
-            lines.append(f"  {icon} [{s.id}] {s.description} (依赖: {deps})")
         return "\n".join(lines)
 
     def _build_final_result(self, steps: list[ExecutionStep]) -> str:

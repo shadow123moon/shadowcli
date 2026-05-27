@@ -15,6 +15,8 @@
 - messages.py     AgentMessage + MessageType + 静态工厂
 - budget.py       AgentBudget 三道防护
 - sub_agent.py    SubAgent 含完整 ReAct 循环
+- planning_phase.py 规划阶段：生成/解析/审查计划
+- execution_phase.py 执行阶段：单步 Worker 执行
 - orchestrator.py AgentOrchestrator 编排 + 并行池化
 
 外部使用示例：
@@ -47,7 +49,15 @@
 """
 from .budget import AgentBudget, ExitReason
 from .messages import AgentMessage, MessageType
-from .orchestrator import AgentOrchestrator, ExecutionStep, StepStatus, PlanReviewDecision, parse_plan_review_input
+from .orchestrator import AgentOrchestrator
+from .plan_types import (
+    ExecutionStep,
+    PlanReviewDecision,
+    PlanReviewFn,
+    StepStatus,
+    parse_plan_review_input,
+)
+from .planning_phase import PlanningPhase, PlanningResult
 from .roles import AgentRole
 from .sub_agent import ChatFn, SubAgent
 
@@ -60,6 +70,11 @@ __all__ = [
     "ExecutionStep",
     "ExitReason",
     "MessageType",
+    "PlanReviewDecision",
+    "PlanReviewFn",
+    "PlanningPhase",
+    "PlanningResult",
     "StepStatus",
     "SubAgent",
+    "parse_plan_review_input",
 ]

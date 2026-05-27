@@ -13,7 +13,6 @@ import json
 import logging
 import threading
 import time
-from io import StringIO
 from typing import Callable
 
 from llm import Message, ToolCall, FunctionCall, chat_stream
@@ -24,7 +23,6 @@ from .budget import AgentBudget
 from .roles import AgentRole
 
 log = logging.getLogger(__name__)
-COMMAND_OUTPUT_PREVIEW_CHARS = 4000
 TOOL_ACTION_PREVIEW_CHARS = 50
 
 # LLM chat 函数签名：chat(messages, tools=None, ...) -> ChatResponse-like
@@ -73,7 +71,11 @@ PLANNER_PROMPT = """你是一个任务规划专家。请将用户需求拆解为
 - 每个步骤必须足够小，有单一明确交付物，适合一个 Worker 在有限工具调用内完成。
 - 不要把多个文件的大规模实现合并成一个步骤；涉及多文件时拆成模型/路由/模板/样式/测试等独立步骤。
 - 实现和验证应拆成不同步骤；不要在实现步骤里启动服务或跑完整验收。
-- 如果任务很大，优先规划一个可展示的最小闭环，再把后续增强拆成独立步骤。
+- 默认优先规划 MVP，也就是最小可验证闭环；先交付一个能创建、运行或验证的小结果，再规划增强步骤。
+- 不要把创建目录单独拆成步骤；写文件工具会自动创建父目录，应直接规划写入目标文件。
+- 不要主动规划安装依赖；只有用户明确要求安装，或验证步骤证明依赖缺失时，才规划安装步骤。
+- 不要规划启动长驻服务；验证优先使用短命令，例如 python -c、python -m unittest、conda run -n <环境名> python -c。
+- 如果任务很大，先规划一个可展示的最小可验证闭环，再把后续增强拆成独立步骤。
 
 依赖关系必须用 step_id 引用其他步骤的 id。直接输出 JSON，不要其他说明。"""
 
@@ -89,8 +91,16 @@ def _worker_prompt(tools_desc: str) -> str:
 - 只完成当前步骤描述的范围；不要主动扩展到后续计划步骤，也不要把未要求的增强继续塞进本步骤。
 - 不要为了同一个目的反复调用等价命令；工具已经给出可用结果后，直接基于结果回答。
 - 如果不知道应该读哪些文件，先用 grep / find / ls 定位，再用 read 读取当前完整文件。
+- 如果目标路径和内容已经明确，直接 write；write 工具会自动创建父目录，不要为了创建目录单独调用 bash mkdir，也不要为了确认刚写入的文件再 read 一遍。
 - 如果调用了工具，最终结果要列明关键证据：读了哪些文件、写了哪些文件、执行了什么命令、关键输出是什么。
 - 列目录时要列出实际看到的文件/目录名；读文件时要说明文件路径和核心发现；写文件时要说明修改路径和修改点。
+- 环境检查最多执行 1-2 条命令；优先使用 import/version 这类短命令确认关键信息。
+- 不要运行 pip list、conda env list 等大输出枚举命令，除非用户明确要求。
+- 不要安装依赖，除非当前步骤明确要求安装，且用户任务允许这样做。
+- 如果用户指定 conda 环境，优先使用 conda run -n <环境名> python -c ... 这类短命令；不要依赖 activate 或 && 串联。
+- 不要启动前台长驻服务；验证 Web 应用时优先使用 import app、test_client 或短命令，不要直接 python app.py。
+- 验证优先用一条内联 python -c 命令；不要创建临时测试文件再删除，不要在验证成功后再执行 python --version、pip show 等额外探测。
+- 如果用户没有明确要求可直接启动服务，不要主动写 `if __name__ == '__main__': app.run(...)`、`uvicorn.run(...)` 等入口；Web 示例优先暴露 app 对象给 import/test_client 验证。
 - 如果工具失败，先阅读工具返回的完整错误信息。
 - 如果错误原因明确，并且可以做出一个实质不同的修正，可以重试一次。
 - 不要重复执行完全相同或仅形式不同的命令。
@@ -328,9 +338,15 @@ class SubAgent:
                 len(result or ""),
                 _preview(result),
             )
+            log.debug(
+                "[工具结果] %s 调用 %s 完整结果：\n%s",
+                display_name,
+                tool_call.function.name,
+                result or "",
+            )
             return result
         except ToolExecutionBlocked:
-            log.warning(
+            log.info(
                 "[工具] %s 调用 %s 被拒绝",
                 self._display_name(),
                 tool_call.function.name,
@@ -342,27 +358,3 @@ class SubAgent:
 
     def __repr__(self) -> str:
         return f"SubAgent(name={self.name!r}, role={self.role.name}, history={len(self.conversation_history)})"
-
-
-def _emit(out: StringIO | None, msg: str) -> None:
-    if out is not None:
-        out.write(msg + "\n")
-    else:
-        print(msg)
-
-
-def _emit_command_result(
-    out: StringIO | None,
-    agent_name: str,
-    tool_name: str,
-    result: str,
-) -> None:
-    if tool_name not in {"bash", "execute_command"}:
-        return
-    text = result or ""
-    if len(text) > COMMAND_OUTPUT_PREVIEW_CHARS:
-        text = (
-            text[:COMMAND_OUTPUT_PREVIEW_CHARS]
-            + f"\n...（输出过长，已截断；完整结果见计划日志，共 {len(result)} 字）"
-        )
-    _emit(out, f"📤 [{agent_name}] {tool_name} 结果:\n{text}")
