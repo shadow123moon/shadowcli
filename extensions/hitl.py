@@ -1,3 +1,8 @@
+from cli_app.terminal_ui import (
+    ask_approval_advice,
+    ask_approval_choice,
+    print_approval_request,
+)
 from extensions import approval_policy as policy
 
 
@@ -9,15 +14,15 @@ def hitl_handler(tool_name, arguments, tool):
     if not policy.requires_approval_for_tool(tool, arguments):
         return None
 
-    print(f"\n⚠️ {policy.danger_level_for_tool(tool)} {tool_name}")
-    print(f"   风险: {policy.risk_description_for_tool(tool)}")
-    print(f"   参数: {arguments}")
+    level = policy.danger_level_for_tool(tool)
+    risk_description = policy.risk_description_for_tool(tool)
+    print_approval_request(level, tool_name, risk_description, arguments)
 
-    choice = input("允许执行？[y/n/c]: ").strip().lower()
+    choice = ask_approval_choice()
     if choice == "y":
         return None
     if choice == "c":
-        advice = input("补充说明: ").strip()
+        advice = ask_approval_advice()
         return {
             "block": True,
             "hard_stop": False,

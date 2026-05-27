@@ -27,8 +27,24 @@ from enum import Enum
 from io import StringIO
 from typing import Callable
 
+from cli_app.terminal_ui import (
+    print_buffer,
+    print_command_result,
+    print_content_delta,
+    print_execution_phase,
+    print_parallel_batch,
+    print_plan_start,
+    print_plan_steps,
+    print_replan,
+    print_step_cancelled,
+    print_step_done,
+    print_step_failed,
+    print_step_skipped,
+    print_step_start,
+    print_tool_start,
+)
 from .roles import AgentRole
-from .sub_agent import ChatFn, SubAgent, _emit_command_result
+from .sub_agent import ChatFn, SubAgent
 
 log = logging.getLogger(__name__)
 
@@ -143,8 +159,7 @@ class AgentOrchestrator:
 
         # 1. 规划
         log.info("[计划] 第一阶段：开始生成执行计划")
-        print("📋 第一阶段：规划")
-        print("🧑‍💼 规划者正在分析任务...\n")
+        print_plan_start()
 
         # 流式执行规划
         from llm.types import Message
@@ -153,7 +168,7 @@ class AgentOrchestrator:
         for event in self.planner.execute(task_msg, context=memory_context):
             if event.type == "content":
                 plan_content_parts.append(event.data)
-                print(event.data, end="", flush=True)
+                print_content_delta(event.data)
             elif event.type == "done":
                 reason = event.data.get("reason") if event.data else None
                 if reason == "cancelled":
@@ -176,8 +191,7 @@ class AgentOrchestrator:
         if not steps:
             return f"❌ 规划失败：无法解析执行计划\n原始输出:\n{plan_content}"
 
-        print("📋 执行计划")
-        print(self._summarize_steps(steps) + "\n")
+        print_plan_steps(self._summarize_steps(steps))
 
         # 计划审查（如果配置了 handler）
         if self._plan_review_handler is not None:
@@ -191,7 +205,7 @@ class AgentOrchestrator:
                     return "⏹️ 已取消本次计划执行。"
                 # SUPPLEMENT：补充要求，重新规划
                 log.info("[计划] 用户补充要求：%s", feedback)
-                print("📝 已收到补充要求，正在重新规划...\n")
+                print_replan()
                 current_goal = f"{user_input}\n补充要求：{feedback}"
 
                 # 流式重新规划
@@ -200,7 +214,7 @@ class AgentOrchestrator:
                 for event in self.planner.execute(replan_task, context=memory_context):
                     if event.type == "content":
                         replan_content_parts.append(event.data)
-                        print(event.data, end="", flush=True)
+                        print_content_delta(event.data)
                     elif event.type == "done":
                         reason = event.data.get("reason") if event.data else None
                         if reason == "cancelled":
@@ -216,12 +230,11 @@ class AgentOrchestrator:
                 steps = self._parse_plan(replan_content)
                 if not steps:
                     return f"❌ 重新规划失败：无法解析执行计划\n原始输出:\n{replan_content}"
-                print("📋 新执行计划")
-                print(self._summarize_steps(steps) + "\n")
+                print_plan_steps(self._summarize_steps(steps), title="📋 新执行计划")
 
         # 3. 执行阶段
         log.info("[计划] 第二阶段：开始执行 %d 个步骤", len(steps))
-        print("⚡ 第二阶段：执行")
+        print_execution_phase()
         single_cursor = 0
         batch_index = 0
 
@@ -250,10 +263,7 @@ class AgentOrchestrator:
                 worker.clear_history()
             else:
                 # 多步：并行 + 缓冲 + 顺序 flush
-                print(
-                    f"⚡ 批次 #{batch_index}：{len(executable)} 个独立步骤并行执行"
-                    f"（最多 {self.worker_count} 个并发 Worker）\n"
-                )
+                print_parallel_batch(batch_index, len(executable), self.worker_count)
                 await self._run_batch_parallel(
                     executable, steps, memory_context=memory_context
                 )
@@ -261,7 +271,7 @@ class AgentOrchestrator:
         # 4. 因前置失败而无法执行的残留步骤（显式提示）
         for step in steps:
             if step.is_pending:
-                print(f"⏭️ 步骤 [{step.id}] 因前置步骤失败被跳过: {step.description}")
+                print_step_skipped(step.id, step.description)
 
         # 5. 汇总并写回 Memory
         final = self._build_final_result(steps)
@@ -349,7 +359,7 @@ class AgentOrchestrator:
             worker.name,
             len(step.dependencies),
         )
-        _emit(out, f"🛠️ {worker.name} 执行步骤 [{step.id}]: {step.description}")
+        print_step_start(worker.name, step.id, step.description, out)
         if self.cancel.is_set():
             step.status = StepStatus.FAILED
             step.result = "用户取消"
@@ -372,30 +382,23 @@ class AgentOrchestrator:
 
                 if event.type == "content":
                     content_parts.append(event.data)
-                    if out is not None:
-                        out.write(event.data)
-                    else:
-                        print(event.data, end="", flush=True)
+                    print_content_delta(event.data, out)
                 elif event.type == "tool_call_start":
-                    msg = f"\n🛠️ {event.data['name']}"
-                    if out is not None:
-                        out.write(msg)
-                    else:
-                        print(msg, flush=True)
+                    print_tool_start(event.data["name"], out)
                 elif event.type == "tool_result":
-                    _emit_command_result(out, worker.name, event.data["name"], event.data["result"])
+                    print_command_result(worker.name, event.data["name"], event.data["result"], out)
                 elif event.type == "done":
                     reason = event.data.get("reason") if event.data else None
                     if reason == "cancelled":
                         step.status = StepStatus.FAILED
                         step.result = "用户取消"
-                        _emit(out, f"❌ 步骤 [{step.id}] 被取消\n")
+                        print_step_cancelled(step.id, out)
                         log.info("[计划] 步骤 %s 被取消", step.id)
                         return
                     elif reason == "blocked":
                         step.status = StepStatus.FAILED
                         step.result = "工具调用被拒绝"
-                        _emit(out, f"❌ 步骤 [{step.id}] 执行失败：工具调用被拒绝\n")
+                        print_step_failed(step.id, "工具调用被拒绝", out)
                         log.info("[计划] 步骤 %s 执行失败：工具调用被拒绝", step.id)
                         return
                     break
@@ -404,19 +407,19 @@ class AgentOrchestrator:
             if not result:
                 step.status = StepStatus.FAILED
                 step.result = "执行结果为空"
-                _emit(out, f"❌ 步骤 [{step.id}] 执行失败：结果为空\n")
+                print_step_failed(step.id, "结果为空", out)
                 log.info("[计划] 步骤 %s 执行失败：结果为空", step.id)
                 return
 
             step.status = StepStatus.COMPLETED
             step.result = result
-            _emit(out, f"✅ 步骤 [{step.id}] 执行完成\n")
+            print_step_done(step.id, out)
             log.info("[计划] 步骤 %s 完成", step.id)
 
         except Exception as exc:
             step.status = StepStatus.FAILED
             step.result = f"执行失败: {exc}"
-            _emit(out, f"❌ 步骤 [{step.id}] 执行失败：{exc}\n")
+            print_step_failed(step.id, str(exc), out)
             log.error("[计划] 步骤 %s 执行失败：%s", step.id, exc)
 
     async def _run_batch_parallel(
@@ -473,7 +476,7 @@ class AgentOrchestrator:
         for step in batch:
             content = buffers[step.id].getvalue()
             if content:
-                print(content, end="")
+                print_buffer(content)
         log.info("[计划] 并行批次完成，步骤=%s", ",".join(step.id for step in batch))
 
     # —— 上下文构建 ——
@@ -536,10 +539,3 @@ class AgentOrchestrator:
             f"memory={'on' if self.memory_manager else 'off'})"
         )
 
-
-def _emit(out: StringIO | None, msg: str) -> None:
-    """写到缓冲（并行批次）或 stdout（单步串行）。"""
-    if out is not None:
-        out.write(msg + "\n")
-    else:
-        print(msg)

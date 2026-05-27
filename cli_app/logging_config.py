@@ -3,7 +3,7 @@ import os
 
 
 def configure_logging() -> None:
-    level_name = os.getenv("PAICLI_LOG_LEVEL", "INFO").upper()
+    level_name = os.getenv("PAICLI_LOG_LEVEL", "WARNING").upper()
     console_level = getattr(logging, level_name, logging.INFO)
     formatter = logging.Formatter("%(asctime)s %(message)s")
     root_logger = logging.getLogger()

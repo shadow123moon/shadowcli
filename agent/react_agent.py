@@ -1,8 +1,14 @@
 import logging
 
+from cli_app.terminal_ui import (
+    print_cancel_requested,
+    print_cancelled,
+    print_command_result,
+    print_content_delta,
+    print_tool_start,
+)
 from llm.client import chat
 from multi_agent import AgentRole, SubAgent
-from multi_agent.sub_agent import _emit_command_result
 from tooling import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -64,20 +70,20 @@ class ReactAgent:
             for event in self.reactr.execute(task, context=memory_context, allow_tools=allow_tools):
                 if event.type == "content":
                     content_parts.append(event.data)
-                    print(event.data, end="", flush=True)  # 实时输出
+                    print_content_delta(event.data)  # 实时输出
                 elif event.type == "tool_call_start":
-                    print(f"\n🛠️ {event.data['name']}", flush=True)
+                    print_tool_start(event.data["name"])
                 elif event.type == "tool_result":
-                    _emit_command_result(None, "react", event.data["name"], event.data["result"])
+                    print_command_result("react", event.data["name"], event.data["result"])
                 elif event.type == "done":
                     reason = event.data.get("reason") if event.data else None
                     if reason == "cancelled":
-                        print("\n\n⚠️ 已取消", flush=True)
+                        print_cancelled()
                     break
             result = "".join(content_parts)
         except KeyboardInterrupt:
             # 用户按 Ctrl+C，设置取消标志
-            print("\n\n⚠️ 检测到 Ctrl+C，正在停止...", flush=True)
+            print_cancel_requested()
             self.reactr.cancel.set()
             result = "".join(content_parts) + "\n[已中止]"
         finally:

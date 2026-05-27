@@ -40,7 +40,8 @@ class PlanLogSession:
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         if exc_type is not None:
-            log.error("[计划日志] 本次计划异常结束：%s", exc, exc_info=(exc_type, exc, tb))
+            log.error("[计划日志] 本次计划异常结束：%s", exc)
+            log.debug("[计划日志] 异常详情", exc_info=(exc_type, exc, tb))
         else:
             log.info("[计划日志] 本次计划正常结束")
 
