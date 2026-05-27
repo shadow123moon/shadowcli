@@ -6,7 +6,7 @@ import requests
 class WebSearchTool(Tool):
     @property
     def name(self):
-        return "Web Search"
+        return "web_search"
 
     @property
     def description(self):

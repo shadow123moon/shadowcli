@@ -26,11 +26,11 @@ import time
 from io import StringIO
 from typing import Callable
 
-from llm import Message, chat_stream, ToolCall, FunctionCall
+from llm import Message, ToolCall, FunctionCall
 
 from extensions.tool_runtime import ToolExecutionBlocked
 
-from .budget import AgentBudget, ExitReason
+from .budget import AgentBudget
 from .messages import AgentMessage
 from .roles import AgentRole
 
@@ -156,8 +156,9 @@ class SubAgent:
         :param allow_tools: 是否允许调用工具（默认 True）
 
         注意：
-        - chat_stream 在流结束时 yield 完整的 tool_call（已聚合 arguments）
+        - 使用注入的 self._chat 进行流式调用
         - 所有退出路径都 yield done 事件
+        - 工具执行带完整日志
         """
         from llm.client import StreamEvent
 
@@ -179,18 +180,34 @@ class SubAgent:
 
             # 累积本轮的 content 和 tool_calls
             content_parts: list[str] = []
-            tool_calls_data: list[dict] = []  # chat_stream 已聚合好完整的 tool_call
+            tool_calls_data: list[dict] = []
 
-            # 流式调用 LLM
-            for event in chat_stream(
-                self.conversation_history, tools=tools_schema, cancel=self.cancel
-            ):
-                if event.type == "content":
-                    content_parts.append(event.data)
-                    yield event  # 透传
-                elif event.type == "tool_call":
-                    # chat_stream 在流结束时 yield 完整的 tool_call
-                    tool_calls_data.append(event.data)
+            # 流式调用 LLM（使用注入的 chat 函数）
+            try:
+                for event in self._chat_stream_wrapper(tools_schema):
+                    if self.cancel.is_set():
+                        yield StreamEvent("content", "\n⏹️ 用户取消")
+                        yield StreamEvent("done", {"reason": "cancelled"})
+                        return
+
+                    if event.type == "content":
+                        content_parts.append(event.data)
+                        yield event  # 透传
+                    elif event.type == "tool_call":
+                        tool_calls_data.append(event.data)
+                    elif event.type == "done":
+                        # 处理 LLM 层的取消/错误
+                        if event.data and event.data.get("reason") == "cancelled":
+                            yield event
+                            return
+                    elif event.type == "error":
+                        yield event
+                        return
+            except Exception as exc:
+                log.error("[Agent:%s] LLM 调用失败：%s", self.name, exc)
+                yield StreamEvent("error", f"LLM 调用失败: {exc}")
+                yield StreamEvent("done", {"reason": "error"})
+                return
 
             # 构造完整 Message 加入 history
             response_msg = Message(
@@ -217,136 +234,37 @@ class SubAgent:
                 yield StreamEvent("done", {"reason": "finished"})
                 return
 
-            # 执行工具
+            # 执行工具（带日志）
             for tc in tool_calls_data:
-                # 检查取消
                 if self.cancel.is_set():
                     yield StreamEvent("content", "\n⏹️ 用户取消")
                     yield StreamEvent("done", {"reason": "cancelled"})
                     return
 
-                # 通知开始执行工具
                 yield StreamEvent(
                     "tool_call_start", {"name": tc["name"], "args": tc["arguments"]}
                 )
 
-                # 执行
+                # 使用原有的 _exec_one 执行工具（带完整日志）
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                tool_call_obj = ToolCall(
+                    id=tc["id"],
+                    type="function",
+                    function=FunctionCall(name=tc["name"], arguments=tc["arguments"])
+                )
+
                 try:
-                    result = self.tool_registry.execute(tc["name"], args)
+                    result = self._exec_one(tool_call_obj)
+                    if "工具调用被拒绝" in result:
+                        yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+                        yield StreamEvent("done", {"reason": "blocked"})
+                        return
                 except ToolExecutionBlocked as exc:
                     result = f"工具调用被拒绝: {exc}"
                     yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
                     yield StreamEvent("done", {"reason": "blocked"})
                     return
-                except Exception as exc:
-                    result = f"工具执行失败: {exc!r}"
 
-                # 通知工具结果
-                yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-
-                # 加入 history
-                self.conversation_history.append(
-                    Message(role="tool", content=result, tool_call_id=tc["id"])
-                )
-
-            # 继续下一轮
-
-        # 超过轮数限制
-        yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
-        yield StreamEvent("done", {"reason": "max_turns"})
-        """纯流式版本。yield StreamEvent。
-
-        注意：
-        - chat_stream 在流结束时 yield 完整的 tool_call（已聚合 arguments）
-        - 所有退出路径都 yield done 事件
-        """
-        from llm.client import StreamEvent
-
-        user_content = task.content if not context else f"{context}\n\n当前任务：{task.content}"
-        self.conversation_history.append(Message(role="user", content=user_content))
-        budget = AgentBudget.from_env()
-
-        for _turn in range(budget.hard_max_iterations):
-            # 检查取消
-            if self.cancel.is_set():
-                yield StreamEvent("content", "\n⏹️ 用户取消")
-                yield StreamEvent("done", {"reason": "cancelled"})
-                return
-
-            # 构造工具 schema
-            tools_schema = (
-                self.tool_registry.get_all_definitions()
-                if self._uses_tools()
-                else None
-            )
-
-            # 累积本轮的 content 和 tool_calls
-            content_parts: list[str] = []
-            tool_calls_data: list[dict] = []  # chat_stream 已聚合好完整的 tool_call
-
-            # 流式调用 LLM
-            for event in chat_stream(
-                self.conversation_history, tools=tools_schema, cancel=self.cancel
-            ):
-                if event.type == "content":
-                    content_parts.append(event.data)
-                    yield event  # 透传
-                elif event.type == "tool_call":
-                    # chat_stream 在流结束时 yield 完整的 tool_call
-                    tool_calls_data.append(event.data)
-
-            # 构造完整 Message 加入 history
-            response_msg = Message(
-                role="assistant",
-                content="".join(content_parts) or None,
-                tool_calls=[
-                    ToolCall(
-                        id=tc["id"],
-                        type=tc["type"],
-                        function=FunctionCall(
-                            name=tc["name"],
-                            arguments=tc["arguments"]
-                        ),
-                    )
-                    for tc in tool_calls_data
-                ]
-                if tool_calls_data
-                else None,
-            )
-            self.conversation_history.append(response_msg)
-
-            # 没有 tool_calls，结束
-            if not tool_calls_data:
-                yield StreamEvent("done", {"reason": "finished"})
-                return
-
-            # 执行工具
-            for tc in tool_calls_data:
-                # 检查取消
-                if self.cancel.is_set():
-                    yield StreamEvent("content", "\n⏹️ 用户取消")
-                    yield StreamEvent("done", {"reason": "cancelled"})
-                    return
-
-                # 通知开始执行工具
-                yield StreamEvent(
-                    "tool_call_start", {"name": tc["name"], "args": tc["arguments"]}
-                )
-
-                # 执行
-                args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                try:
-                    result = self.tool_registry.execute(tc["name"], args)
-                except ToolExecutionBlocked as exc:
-                    result = f"工具调用被拒绝: {exc}"
-                    yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-                    yield StreamEvent("done", {"reason": "blocked"})
-                    return
-                except Exception as exc:
-                    result = f"工具执行失败: {exc!r}"
-
-                # 通知工具结果
                 yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
 
                 # 加入 history
@@ -442,6 +360,42 @@ class SubAgent:
             return self.name
         return f"{self.name} [{_preview(self._current_step_label, TOOL_ACTION_PREVIEW_CHARS)}]"
 
+    def _chat_stream_wrapper(self, tools_schema):
+        """包装注入的 chat 函数，使其支持流式输出。
+
+        如果 self._chat 本身就是流式的（返回生成器），直接使用。
+        否则调用全局 chat_stream 作为后备。
+        """
+        from llm.client import chat_stream as global_chat_stream
+        from typing import Iterator, Any
+
+        # 尝试调用注入的 chat（可能是 fake_chat 或真实 chat）
+        # 如果它支持 stream 参数，使用它；否则用全局 chat_stream
+        try:
+            # 检查是否是可调用对象
+            if callable(self._chat):
+                # 尝试以流式方式调用
+                result: Any = self._chat(
+                    self.conversation_history,
+                    tools=tools_schema,
+                    stream=True,
+                    cancel=self.cancel
+                )
+                # 如果返回生成器，使用它
+                if hasattr(result, '__iter__') and not isinstance(result, (str, bytes)):
+                    yield from result  # type: ignore
+                    return
+        except TypeError:
+            # 不支持 stream 参数，降级到全局 chat_stream
+            pass
+
+        # 后备：使用全局 chat_stream
+        yield from global_chat_stream(
+            self.conversation_history,
+            tools=tools_schema,
+            cancel=self.cancel
+        )
+
     def _build_system_prompt(self) -> str:
         if self.role == AgentRole.PLANNER:
             return PLANNER_PROMPT
@@ -505,29 +459,3 @@ class SubAgent:
 
     def __repr__(self) -> str:
         return f"SubAgent(name={self.name!r}, role={self.role.name}, history={len(self.conversation_history)})"
-
-
-def _emit(out: StringIO | None, msg: str) -> None:
-    """写到缓冲或 stdout。并行批次用缓冲，单步用 None 直 print。"""
-    if out is not None:
-        out.write(msg + "\n")
-    else:
-        print(msg)
-
-
-def _emit_command_result(
-    out: StringIO | None,
-    agent_name: str,
-    tool_name: str,
-    result: str,
-) -> None:
-    """把命令类工具的结果展示给用户，方便判断命令是否报错。"""
-    if tool_name not in {"bash", "execute_command"}:
-        return
-    text = result or ""
-    if len(text) > COMMAND_OUTPUT_PREVIEW_CHARS:
-        text = (
-            text[:COMMAND_OUTPUT_PREVIEW_CHARS]
-            + f"\n...（输出过长，已截断；完整结果见计划日志，共 {len(result)} 字）"
-        )
-    _emit(out, f"📤 [{agent_name}] {tool_name} 结果:\n{text}")

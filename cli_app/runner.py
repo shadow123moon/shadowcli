@@ -44,22 +44,23 @@ def run_once(
                 result = asyncio.run(plan_agent.run(plan_input))
                 title = "计划模式结果:"
                 log.info("[入口] 准备输出%s，内容长度 %d 字", title, len(result or ""))
+                # Plan 模式：打印最终结果
+                print("\n" + "-" * 50)
+                print(title)
+                print(result)
+                if plan_log_path is not None:
+                    print(f"计划日志: {plan_log_path}")
+                print("-" * 50)
         else:
             log.info("[入口] 识别为普通对话，进入 React 模式，输入长度 %d 字", len(user_input))
             result = agent.run(user_input)
-            title = "最终结果:"
-            log.info("[入口] 准备输出%s，内容长度 %d 字", title, len(result or ""))
+            # React 模式：已经流式打印，不再重复输出
+            log.info("[入口] React 模式完成，输出长度 %d 字", len(result or ""))
     except Exception as e:
         log.exception("[入口] 执行失败")
         print(f"\n[ERROR] 执行失败: {e}")
         traceback.print_exc()
         return
-    print("\n" + "-" * 50)
-    print(title)
-    print(result)
-    if plan_log_path is not None:
-        print(f"计划日志: {plan_log_path}")
-    print("-" * 50)
 
 
 def repl() -> int:
