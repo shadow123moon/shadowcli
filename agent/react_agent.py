@@ -2,6 +2,7 @@ import logging
 
 from llm.client import chat
 from multi_agent import AgentRole, SubAgent
+from multi_agent.sub_agent import _emit_command_result
 from tooling import ToolRegistry
 
 log = logging.getLogger(__name__)
@@ -29,7 +30,6 @@ class ReactAgent:
             role=AgentRole.REACT,
             chat=chat,
             tool_registry=tool_registry,
-            memory_manager=memory_manager,
         )
 
     def run(self, user_input: str) -> str:
@@ -67,6 +67,8 @@ class ReactAgent:
                     print(event.data, end="", flush=True)  # 实时输出
                 elif event.type == "tool_call_start":
                     print(f"\n🛠️ {event.data['name']}", flush=True)
+                elif event.type == "tool_result":
+                    _emit_command_result(None, "react", event.data["name"], event.data["result"])
                 elif event.type == "done":
                     reason = event.data.get("reason") if event.data else None
                     if reason == "cancelled":

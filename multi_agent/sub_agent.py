@@ -1,24 +1,14 @@
-"""SubAgent - 可配置角色的轻量 Agent，含完整 ReAct 循环。
+"""SubAgent - 单角色 ReAct 执行器。
 
-与简单版的关键差异：
-- execute 是 async，内含完整 while 循环：调 LLM → 有 tool_calls 就执行工具
-  → 工具结果回灌 history → 继续，直到收到最终 content
-- 工具调用并行执行（asyncio.gather + asyncio.to_thread 包装 sync 工具）
-- AgentBudget 三道防护防死循环
-- 接 MemoryManager 在 LLM 调用前压缩历史
-- 接 threading.Event 做取消（在 await 点轮询 is_set()）
+SubAgent 只维护本轮运行所需的 runtime messages：
+LLM 流式输出 -> 收集完整 tool_call -> 执行工具 -> 将工具结果回灌消息栈
+-> 继续下一轮，直到模型给出最终 content 或触发取消/预算保护。
 
-Pythonic 要点：
-- async def execute 全链路 async
-- asyncio.to_thread 包装 sync chat / 工具
-- asyncio.gather 并行执行多个工具调用
-- walrus :=
-- keyword-only 参数
-- __repr__ 替代状态打印
+会话记忆由 ReactAgent / AgentOrchestrator 在外层注入，SubAgent 不保存
+MemoryManager，也不负责跨轮记忆或终端界面。
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -26,12 +16,11 @@ import time
 from io import StringIO
 from typing import Callable
 
-from llm import Message, ToolCall, FunctionCall
+from llm import Message, ToolCall, FunctionCall, chat_stream
 
 from extensions.tool_runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget
-from .messages import AgentMessage
 from .roles import AgentRole
 
 log = logging.getLogger(__name__)
@@ -134,14 +123,11 @@ class SubAgent:
         chat: ChatFn,
         tool_registry,
         *,
-        memory_manager=None,
         cancel: threading.Event | None = None,
     ):
         self.name = name
         self.role = role
-        self._chat = chat
         self.tool_registry = tool_registry
-        self.memory_manager = memory_manager
         self.cancel = cancel or threading.Event()
         self.conversation_history: list[Message] = []
         self._current_step_label: str | None = None
@@ -155,10 +141,7 @@ class SubAgent:
         :param context: 可选前置上下文
         :param allow_tools: 是否允许调用工具（默认 True）
 
-        注意：
-        - 使用注入的 self._chat 进行流式调用
-        - 所有退出路径都 yield done 事件
-        - 工具执行带完整日志
+        注意：执行链路统一走 chat_stream，所有退出路径都 yield done 事件。
         """
         from llm.client import StreamEvent
 
@@ -182,9 +165,13 @@ class SubAgent:
             content_parts: list[str] = []
             tool_calls_data: list[dict] = []
 
-            # 流式调用 LLM（使用注入的 chat 函数）
+            # 流式调用 LLM；项目运行时统一走真实 chat_stream。
             try:
-                for event in self._chat_stream_wrapper(tools_schema):
+                for event in chat_stream(
+                    self.conversation_history,
+                    tools=tools_schema,
+                    cancel=self.cancel,
+                ):
                     if self.cancel.is_set():
                         yield StreamEvent("content", "\n⏹️ 用户取消")
                         yield StreamEvent("done", {"reason": "cancelled"})
@@ -278,66 +265,6 @@ class SubAgent:
         yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
         yield StreamEvent("done", {"reason": "max_turns"})
 
-    async def execute_batch(
-        self,
-        task: AgentMessage,
-        *,
-        context: str = "",
-        out: StringIO | None = None,
-        step_label: str | None = None,
-        allow_tools: bool = True,
-    ) -> AgentMessage:
-        """批量执行版本（消费流式事件，返回完整结果）。
-
-        用于 Plan 模式等需要等待完整结果的场景。
-        内部调用流式 execute()，收集所有输出后返回。
-
-        :param task: 任务消息
-        :param context: 可选前置上下文
-        :param out: 可选输出缓冲（None 时直接 print）
-        :param step_label: 可选步骤标签（用于日志）
-        :param allow_tools: 是否允许调用工具
-        :return: AgentMessage（RESULT 或 ERROR）
-        """
-        from llm.types import Message
-
-        content_parts = []
-        # 转换 AgentMessage -> Message
-        task_msg = Message(role="user", content=task.content)
-
-        try:
-            for event in self.execute(task_msg, context=context, allow_tools=allow_tools):
-                if event.type == "content":
-                    content_parts.append(event.data)
-                    if out is not None:
-                        out.write(event.data)
-                    else:
-                        print(event.data, end="", flush=True)
-                elif event.type == "tool_call_start":
-                    msg = f"\n🛠️ {event.data['name']}"
-                    if out is not None:
-                        out.write(msg)
-                    else:
-                        print(msg, flush=True)
-                elif event.type == "done":
-                    reason = event.data.get("reason") if event.data else None
-                    if reason == "cancelled":
-                        return AgentMessage.error(self.name, self.role, "用户取消")
-                    elif reason == "blocked":
-                        return AgentMessage.error(self.name, self.role, "工具调用被拒绝")
-                    elif reason == "max_turns":
-                        budget = AgentBudget.from_env()
-                        return AgentMessage.error(
-                            self.name, self.role, f"达到最大轮数 {budget.hard_max_iterations}"
-                        )
-                    break
-
-            result = "".join(content_parts)
-            return AgentMessage.result(self.name, self.role, result)
-
-        except Exception as exc:
-            return AgentMessage.error(self.name, self.role, f"执行失败: {exc}")
-
     def clear_history(self) -> None:
         """清空对话历史，保留系统提示。用于处理下一个独立任务。"""
         system_msg = self.conversation_history[0]
@@ -360,42 +287,6 @@ class SubAgent:
             return self.name
         return f"{self.name} [{_preview(self._current_step_label, TOOL_ACTION_PREVIEW_CHARS)}]"
 
-    def _chat_stream_wrapper(self, tools_schema):
-        """包装注入的 chat 函数，使其支持流式输出。
-
-        如果 self._chat 本身就是流式的（返回生成器），直接使用。
-        否则调用全局 chat_stream 作为后备。
-        """
-        from llm.client import chat_stream as global_chat_stream
-        from typing import Iterator, Any
-
-        # 尝试调用注入的 chat（可能是 fake_chat 或真实 chat）
-        # 如果它支持 stream 参数，使用它；否则用全局 chat_stream
-        try:
-            # 检查是否是可调用对象
-            if callable(self._chat):
-                # 尝试以流式方式调用
-                result: Any = self._chat(
-                    self.conversation_history,
-                    tools=tools_schema,
-                    stream=True,
-                    cancel=self.cancel
-                )
-                # 如果返回生成器，使用它
-                if hasattr(result, '__iter__') and not isinstance(result, (str, bytes)):
-                    yield from result  # type: ignore
-                    return
-        except TypeError:
-            # 不支持 stream 参数，降级到全局 chat_stream
-            pass
-
-        # 后备：使用全局 chat_stream
-        yield from global_chat_stream(
-            self.conversation_history,
-            tools=tools_schema,
-            cancel=self.cancel
-        )
-
     def _build_system_prompt(self) -> str:
         if self.role == AgentRole.PLANNER:
             return PLANNER_PROMPT
@@ -408,14 +299,6 @@ class SubAgent:
             return react_agent_prompt(tools_desc=tools_desc)
         # 默认是 Worker
         return _worker_prompt(tools_desc)
-
-    async def _execute_tool_calls(self, tool_calls: list[ToolCall]) -> list[tuple[ToolCall, str]]:
-        """并行执行多个工具调用（每个工具是 sync，用 to_thread 包装并行）。"""
-        if not tool_calls:
-            return []
-        coros = [asyncio.to_thread(self._exec_one, tc) for tc in tool_calls]
-        results = await asyncio.gather(*coros)
-        return list(zip(tool_calls, results))
 
     def _exec_one(self, tool_call) -> str:
         """执行单个工具调用。失败时返回错误字符串，不抛异常。"""
@@ -459,3 +342,27 @@ class SubAgent:
 
     def __repr__(self) -> str:
         return f"SubAgent(name={self.name!r}, role={self.role.name}, history={len(self.conversation_history)})"
+
+
+def _emit(out: StringIO | None, msg: str) -> None:
+    if out is not None:
+        out.write(msg + "\n")
+    else:
+        print(msg)
+
+
+def _emit_command_result(
+    out: StringIO | None,
+    agent_name: str,
+    tool_name: str,
+    result: str,
+) -> None:
+    if tool_name not in {"bash", "execute_command"}:
+        return
+    text = result or ""
+    if len(text) > COMMAND_OUTPUT_PREVIEW_CHARS:
+        text = (
+            text[:COMMAND_OUTPUT_PREVIEW_CHARS]
+            + f"\n...（输出过长，已截断；完整结果见计划日志，共 {len(result)} 字）"
+        )
+    _emit(out, f"📤 [{agent_name}] {tool_name} 结果:\n{text}")

@@ -28,7 +28,7 @@ from io import StringIO
 from typing import Callable
 
 from .roles import AgentRole
-from .sub_agent import ChatFn, SubAgent
+from .sub_agent import ChatFn, SubAgent, _emit_command_result
 
 log = logging.getLogger(__name__)
 
@@ -114,12 +114,12 @@ class AgentOrchestrator:
 
         self.planner = SubAgent(
             "planner", AgentRole.PLANNER, chat, tool_registry,
-            memory_manager=memory_manager, cancel=self.cancel,
+            cancel=self.cancel,
         )
         self.workers = [
             SubAgent(
                 f"worker-{i + 1}", AgentRole.WORKER, chat, tool_registry,
-                memory_manager=memory_manager, cancel=self.cancel,
+                cancel=self.cancel,
             )
             for i in range(self.worker_count)
         ]
@@ -355,6 +355,7 @@ class AgentOrchestrator:
             step.result = "用户取消"
             log.info("[计划] 步骤 %s 被取消", step.id)
             return
+        worker._current_step_label = f"{step.id} {step.description}"
 
         # 流式执行
         from llm.types import Message
@@ -381,6 +382,8 @@ class AgentOrchestrator:
                         out.write(msg)
                     else:
                         print(msg, flush=True)
+                elif event.type == "tool_result":
+                    _emit_command_result(out, worker.name, event.data["name"], event.data["result"])
                 elif event.type == "done":
                     reason = event.data.get("reason") if event.data else None
                     if reason == "cancelled":
