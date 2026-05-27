@@ -56,8 +56,8 @@ class BashTool(Tool):
                     timeout=timeout,
                 )
         except subprocess.TimeoutExpired as exc:
-            return _format_timeout(command, timeout, exc)
-        return _format_command_result(result)
+            return _format_result(exc, command, timeout)
+        return _format_result(result)
 
 
 class ExecuteCommandTool(BashTool):
@@ -67,6 +67,7 @@ class ExecuteCommandTool(BashTool):
 
 
 def _command_timeout(raw_timeout) -> int:
+    """解析超时时间：参数 > 环境变量 > 默认值"""
     try:
         timeout = int(raw_timeout or os.getenv("PAICLI_COMMAND_TIMEOUT_SECONDS") or DEFAULT_COMMAND_TIMEOUT_SECONDS)
     except (TypeError, ValueError):
@@ -74,7 +75,20 @@ def _command_timeout(raw_timeout) -> int:
     return max(1, timeout)
 
 
-def _format_command_result(result: subprocess.CompletedProcess) -> str:
+def _format_result(result, command: str = "", timeout: int = 0) -> str:
+    """格式化命令执行结果（支持正常结果和超时异常）"""
+    # 超时异常
+    if isinstance(result, subprocess.TimeoutExpired):
+        parts = [f"命令超时（超过 {timeout} 秒），已终止。", f"command: {command}"]
+        if result.stdout:
+            stdout_str = result.stdout.decode(errors="replace") if isinstance(result.stdout, bytes) else str(result.stdout)
+            parts.append(f"stdout:\n{stdout_str}")
+        if result.stderr:
+            stderr_str = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr)
+            parts.append(f"stderr:\n{stderr_str}")
+        return "\n\n".join(parts)
+
+    # 正常结果
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     if result.returncode == 0:
@@ -92,18 +106,3 @@ def _format_command_result(result: subprocess.CompletedProcess) -> str:
     if len(parts) == 1:
         parts.append("没有 stdout/stderr 输出。")
     return "\n\n".join(parts)
-
-
-def _format_timeout(command: str, timeout: int, exc: subprocess.TimeoutExpired) -> str:
-    parts = [f"命令超时（超过 {timeout} 秒），已终止。", f"command: {command}"]
-    if exc.stdout:
-        parts.append(f"stdout:\n{_decode_timeout_output(exc.stdout)}")
-    if exc.stderr:
-        parts.append(f"stderr:\n{_decode_timeout_output(exc.stderr)}")
-    return "\n\n".join(parts)
-
-
-def _decode_timeout_output(value) -> str:
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return str(value)
