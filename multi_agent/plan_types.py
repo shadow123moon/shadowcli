@@ -52,6 +52,8 @@ class ExecutionStep:
     id: str
     description: str
     type: str = "COMMAND"
+    reads: list[str] = field(default_factory=list)
+    writes: list[str] = field(default_factory=list)
     dependencies: list[str] = field(default_factory=list)
     status: StepStatus = StepStatus.PENDING
     result: str = ""

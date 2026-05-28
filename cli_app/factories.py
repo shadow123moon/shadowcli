@@ -3,21 +3,15 @@ from pathlib import Path
 
 from agent import ReactAgent
 from extensions.tool_runtime import ToolRuntime
-from llm.client import chat
 from memory_pythonic import MemoryManager
-from multi_agent import AgentOrchestrator, PlanReviewDecision, parse_plan_review_input
 from tooling import (
     BashTool,
     EditTool,
-    ExecuteCommandTool,
     FindTool,
     GrepTool,
-    ListDirTool,
     LsTool,
-    ReadFileTool,
     ReadTool,
     ToolRegistry,
-    WriteFileTool,
     WriteTool,
     WebSearchTool,
     WebFetchTool
@@ -40,10 +34,6 @@ def build_registry() -> ToolRuntime:
     registry.register(LsTool())
     registry.register(GrepTool())
     registry.register(FindTool())
-    registry.register(ReadFileTool())
-    registry.register(WriteFileTool())
-    registry.register(ListDirTool())
-    registry.register(ExecuteCommandTool())
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     runtime = ToolRuntime(registry)
@@ -78,26 +68,9 @@ def build_memory(long_term_path: Path | None = None) -> MemoryManager:
     return MemoryManager(long_term_path=long_term_path or DEFAULT_LONG_TERM_PATH)
 
 
-def build_agent(registry: ToolRegistry, memory: MemoryManager | None = None) -> ReactAgent:
-    return ReactAgent(registry, memory_manager=memory)
-
-
-def default_plan_review_handler(
-    goal: str,
-    steps: list,
-) -> tuple[PlanReviewDecision, str]:
-    """默认的计划审查：展示计划，等用户输入。"""
-    user_input = input("\n回车执行 / 输入补充要求 / cancel取消: ")
-    return parse_plan_review_input(user_input)
-
-
-def build_plan_agent(
+def build_agent(
     registry: ToolRegistry,
     memory: MemoryManager | None = None,
-) -> AgentOrchestrator:
-    return AgentOrchestrator(
-        chat,
-        registry,
-        memory_manager=memory,
-        plan_review_handler=default_plan_review_handler,
-    )
+    session_messages=None,
+) -> ReactAgent:
+    return ReactAgent(registry, memory_manager=memory, session_messages=session_messages)

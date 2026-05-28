@@ -33,10 +33,6 @@ def handle_remember(memory: MemoryManager, user_input: str) -> str:
 
 def format_memory_status(memory: MemoryManager) -> str:
     return "\n".join([
-        (
-            f"short_term: {len(memory.short_term)} entries, "
-            f"{memory.short_term.total_tokens}/{memory.short_term.max_tokens} tokens"
-        ),
         f"long_term : {len(memory.long_term)} entries, {memory.long_term.total_tokens} tokens",
         f"storage   : {memory.long_term.storage_path}",
     ])

@@ -8,8 +8,11 @@ from ui import (
     print_tool_start,
 )
 from llm.client import chat
-from multi_agent import AgentRole, SubAgent
+from llm.types import Message
 from tooling import ToolRegistry
+
+from .agent_loop import AgentLoop
+from .prompts import react_agent_prompt
 
 log = logging.getLogger(__name__)
 
@@ -29,32 +32,31 @@ def _preview(text: str, limit: int = 160) -> str:
 
 
 class ReactAgent:
-    def __init__(self, tool_registry: ToolRegistry, chat=chat, memory_manager=None):
-        self.memory_manager = memory_manager
-        self.reactr = SubAgent(
+    def __init__(
+        self,
+        tool_registry: ToolRegistry,
+        chat=chat,
+        memory_manager=None,
+        session_messages: list[Message] | None = None,
+    ):
+        _ = memory_manager
+        self.session_messages = session_messages if session_messages is not None else []
+        self.reactr = AgentLoop(
             name="react",
-            role=AgentRole.REACT,
+            system_prompt=_build_react_system_prompt(tool_registry),
             chat=chat,
             tool_registry=tool_registry,
+            conversation_history=self.session_messages,
         )
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, context: str = "") -> str:
         log.info(
-            "[React] 开始处理普通输入，输入 %d 字，记忆模块%s",
+            "[React] 开始处理普通输入，输入 %d 字，上下文%s",
             len(user_input or ""),
-            "已开启" if self.memory_manager else "未开启",
+            "已提供" if context else "为空",
         )
-        memory_context = ""
-        if self.memory_manager is not None:
-            memory_context = self.memory_manager.context_for(user_input)
-            log.info(
-                "[React] 直接记忆上下文%s，长度 %d 字",
-                "可用" if memory_context else "为空",
-                len(memory_context),
-            )
-            if memory_context:
-                log.debug("[React] 记忆上下文预览：%s", _preview(memory_context))
-            self.memory_manager.add_user(user_input)
+        if context:
+            log.debug("[React] 外部上下文预览：%s", _preview(context))
 
         allow_tools = _should_enable_tools(user_input)
         log.info("[React] 本轮工具%s", "已启用" if allow_tools else "已禁用")
@@ -63,11 +65,10 @@ class ReactAgent:
         self.reactr.cancel.clear()
 
         # 消费流式事件，收集最终结果
-        from llm.types import Message
         task = Message(role="user", content=user_input)
         content_parts = []
         try:
-            for event in self.reactr.execute(task, context=memory_context, allow_tools=allow_tools):
+            for event in self.reactr.execute(task, context=context, allow_tools=allow_tools):
                 if event.type == "content":
                     content_parts.append(event.data)
                     print_content_delta(event.data)  # 实时输出
@@ -87,10 +88,7 @@ class ReactAgent:
             self.reactr.cancel.set()
             result = "".join(content_parts) + "\n[已中止]"
         finally:
-            self.reactr.clear_history()
-            log.debug("[React] 已清理本轮临时 history")
-        if self.memory_manager is not None:
-            self.memory_manager.add_assistant(result)
+            log.debug("[React] 本轮结束，保留 session messages %d 条", len(self.session_messages))
 
         log.info("[React] 处理完成，回复 %d 字", len(result or ""))
         return result
@@ -103,3 +101,11 @@ def _should_enable_tools(user_input: str) -> bool:
     if any(marker in text for marker in ("/", "\\", ".py", ".md", ".txt", ".json", ".yaml", ".yml")):
         return True
     return any(keyword in text for keyword in TOOL_INTENT_KEYWORDS)
+
+
+def _build_react_system_prompt(tool_registry: ToolRegistry) -> str:
+    defs = tool_registry.get_all_definitions()
+    tools_desc = "\n".join(
+        f"- {d['function']['name']}: {d['function']['description']}" for d in defs
+    )
+    return react_agent_prompt(tools_desc)

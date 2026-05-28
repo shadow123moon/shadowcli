@@ -14,7 +14,7 @@ python -m cli_app
 
 ```text
 普通输入            默认走 ReactAgent
-/plan <任务>        走 AgentOrchestrator，多 Agent 规划执行
+/plan <任务>        走 ReactAgent 单 Agent 计划执行
 /remember <事实>    写入长期记忆
 /memory             查看短期/长期记忆状态
 /tools              查看已注册工具
@@ -40,9 +40,9 @@ cli_app
 
 ```text
 cli_app /plan
-  -> AgentOrchestrator
-  -> planner 生成计划
-  -> worker 执行步骤
+  -> ReactAgent
+  -> 单个 ReAct 循环生成计划并执行
+  -> ToolRuntime.execute(name, args)
   -> ToolRegistry.execute(name, args)
 ```
 
@@ -52,9 +52,10 @@ cli_app /plan
 
 | 模块 | 职责 |
 |---|---|
-| `cli_app/` | 交互入口、命令路由、日志初始化、Plan 日志文件 |
-| `agent/react_agent.py` | 默认 ReAct 对话入口 |
-| `multi_agent/` | Plan-and-Execute、多 Agent 编排、Planner/Worker |
+| `cli_app/` | 交互入口、命令路由、日志初始化 |
+| `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt |
+| `sessions/` | 按项目目录隔离的会话存储，保存完整 messages.jsonl 转录 |
+| `multi_agent/` | 实验/历史 Plan-and-Execute 代码，当前 CLI 主路径禁用 |
 | `planning/` | 旧版 Plan/DAG 数据结构和规划器 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
 | `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
@@ -64,6 +65,25 @@ cli_app /plan
 
 ## 记忆
 
+Session 和 Memory 分层：
+
+```text
+Session = 完整会话转录，可恢复上下文，按项目目录隔离
+Memory  = 提炼后的长期事实/短期摘要
+```
+
+会话存储默认目录：
+
+```text
+~/.pai_cli/sessions/<project_key>/
+  project.json
+  long_term.json
+  conversations/<session_id>/
+    meta.json
+    messages.jsonl
+    summary.md
+```
+
 当前有三层概念：
 
 ```text
@@ -72,7 +92,7 @@ short_term  = 当前会话近期对话，保存在 MemoryManager 内存中
 long_term   = 跨会话可靠事实，默认写入 agent_memory/long_term_memory.json
 ```
 
-普通输入和 `/plan` 都可以通过 `MemoryManager.context_for(user_input)` 读取记忆上下文，但它们不共用同一段 SubAgent history。
+普通输入和 `/plan` 都通过 `ReactAgent` 读取记忆上下文；`/plan` 只是单 Agent 的计划执行提示。
 
 长期记忆当前主要来源：
 
@@ -116,8 +136,6 @@ approval_reason = "将在系统上执行 Shell 命令，可能修改文件、安
 write
 edit
 bash
-write_file
-execute_command
 ```
 
 ## 工具
@@ -134,18 +152,11 @@ grep   搜索文本
 find   查找文件
 ```
 
-为兼容历史 LLM 调用语义，旧工具名仍作为工具 alias 保留：
-
-```text
-read_file
-write_file
-list_dir
-execute_command
-```
+旧版 alias（`read_file` / `write_file` / `list_dir` / `execute_command`）已移除，避免向模型暴露重复工具定义。
 
 ## 日志
 
-普通终端日志默认是 INFO，细节日志写入计划日志文件。
+普通终端日志默认是 INFO，细节日志走全局日志配置。
 
 环境变量：
 
@@ -154,14 +165,15 @@ PAICLI_LOG_LEVEL=INFO
 PAICLI_COMMAND_TIMEOUT_SECONDS=120
 ```
 
-`/plan` 每次执行会在 `logs/plans/` 下生成日志，包含更详细的 Agent、工具调用和 debug 信息。
+`/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局日志。
+旧计划日志模块暂时保留，供后续调试或迁移参考。
 
 工具日志应回答“做了什么”：
 
 ```text
-read_file       看了哪个文件
-write_file      写了哪个文件
-execute_command 执行了什么命令
+read  看了哪个文件
+write 写了哪个文件
+bash  执行了什么命令
 ```
 
 ## 配置和测试
@@ -193,12 +205,12 @@ conda run -n lc python -m unittest discover -s tests -v
 |---|---|
 | CLI 入口 | 已收敛到 `cli_app/` |
 | 默认 React 对话 | 已接入 |
-| `/plan` 多 Agent | 已接入 |
+| `/plan` 单 Agent | 已接入 |
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
 | HITL | 已接入，合并到 `ToolRegistry` |
 | 短期/长期记忆 | 已接入，长期记忆由 `/remember` 写入 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
-| Plan 日志 | 已接入 `logs/plans/` |
+| Plan 日志 | CLI 主路径已停用旧 `logs/plans/` 计划日志 |
 | 测试 | `unittest discover -s tests -v` 覆盖主要链路 |
 
 ## 待清理

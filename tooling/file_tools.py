@@ -199,24 +199,6 @@ class FindTool(Tool):
         return "\n".join(matches) if matches else "未找到文件"
 
 
-class ReadFileTool(ReadTool):
-    @property
-    def name(self):
-        return "read_file"
-
-
-class WriteFileTool(WriteTool):
-    @property
-    def name(self):
-        return "write_file"
-
-
-class ListDirTool(LsTool):
-    @property
-    def name(self):
-        return "list_dir"
-
-
 def _display_path(path: Path, root: Path) -> str:
     try:
         base = root if root.is_dir() else root.parent

@@ -248,7 +248,7 @@ cli_app
 
 ```
 Worker 要调工具
-  → ToolRegistry.execute("write_file", args)
+  → ToolRegistry.execute("write", args)
   → 触发 before_execute 钩子
   → handler 执行（HITL 弹终端 / Reviewer 调 LLM）
   → 返回 block 或放行

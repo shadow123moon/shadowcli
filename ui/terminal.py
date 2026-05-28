@@ -36,13 +36,13 @@ def print_command_result(
     result: str,
     out: TextIO | None = None,
 ) -> None:
-    if tool_name not in {"bash", "execute_command"}:
+    if tool_name != "bash":
         return
     text = result or ""
     if len(text) > COMMAND_OUTPUT_PREVIEW_CHARS:
         text = (
             text[:COMMAND_OUTPUT_PREVIEW_CHARS]
-            + f"\n...（输出过长，已截断；完整结果见计划日志，共 {len(result)} 字）"
+            + f"\n...（输出过长，已截断，共 {len(result)} 字）"
         )
     _write(f"📤 [{agent_name}] {tool_name} 结果:\n{text}", out)
 

@@ -60,12 +60,6 @@ class BashTool(Tool):
         return _format_result(result)
 
 
-class ExecuteCommandTool(BashTool):
-    @property
-    def name(self):
-        return "execute_command"
-
-
 def _command_timeout(raw_timeout) -> int:
     """解析超时时间：参数 > 环境变量 > 默认值"""
     try:

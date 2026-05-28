@@ -1,0 +1,275 @@
+"""Single-agent ReAct loop with tool execution and runtime message history."""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+from typing import Callable
+
+from extensions.tool_runtime import ToolExecutionBlocked
+from llm import FunctionCall, Message, ToolCall, chat_stream
+
+from .budget import AgentBudget, ExitReason
+
+log = logging.getLogger(__name__)
+TOOL_ACTION_PREVIEW_CHARS = 50
+TOOL_ERROR_PREFIXES = (
+    "工具执行失败",
+    "工具调用被拒绝",
+    "操作被拒绝",
+    "命令执行失败",
+    "命令超时",
+    "grep 失败",
+    "搜索失败",
+    "抓取失败",
+    "编辑失败",
+)
+
+ChatFn = Callable[..., object]
+
+
+def _preview(text: str, limit: int = 160) -> str:
+    compact = " ".join((text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
+def _tool_action(tool_name: str, args: dict) -> str:
+    if tool_name == "bash":
+        return f"执行命令：{_preview(args.get('command', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    if tool_name == "read":
+        return f"读取文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    if tool_name == "write":
+        content = args.get("content", "")
+        return f"写入文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}，内容 {len(content or '')} 字"
+    if tool_name == "edit":
+        return f"编辑文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    if tool_name == "ls":
+        return f"列出目录：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    if tool_name == "grep":
+        return f"搜索文本：{_preview(args.get('pattern', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    if tool_name == "find":
+        return f"查找文件：{_preview(args.get('name', ''), TOOL_ACTION_PREVIEW_CHARS)}"
+    return f"参数：{_preview(json.dumps(args, ensure_ascii=False), TOOL_ACTION_PREVIEW_CHARS)}"
+
+
+def _is_tool_error_result(result: str | None) -> bool:
+    text = (result or "").lstrip()
+    return any(text.startswith(prefix) for prefix in TOOL_ERROR_PREFIXES)
+
+
+class AgentLoop:
+    """Reusable ReAct loop for one agent identity."""
+
+    def __init__(
+        self,
+        name: str,
+        system_prompt: str,
+        chat: ChatFn,
+        tool_registry,
+        *,
+        cancel: threading.Event | None = None,
+        conversation_history: list[Message] | None = None,
+        use_tools: bool = True,
+    ):
+        self.name = name
+        self.chat = chat
+        self.tool_registry = tool_registry
+        self.cancel = cancel or threading.Event()
+        self.conversation_history = conversation_history if conversation_history is not None else []
+        self.use_tools = use_tools
+        self._system_prompt = system_prompt
+        self._current_step_label: str | None = None
+        self._reset_system_prompt()
+
+    def execute(self, task: Message, context: str = "", allow_tools: bool = True):
+        """Execute one task and yield StreamEvent objects."""
+        from llm.client import StreamEvent
+
+        task_index = len(self.conversation_history)
+        self.conversation_history.append(Message(role="user", content=task.content))
+        budget = AgentBudget.from_env()
+
+        for _turn in range(budget.hard_max_iterations):
+            budget.begin_iteration()
+            if self.cancel.is_set():
+                yield StreamEvent("content", "\n⏹️ 用户取消")
+                yield StreamEvent("done", {"reason": "cancelled"})
+                return
+
+            tools_schema = None
+            if allow_tools and self.use_tools:
+                tools_schema = self.tool_registry.get_all_definitions()
+
+            content_parts: list[str] = []
+            tool_calls_data: list[dict] = []
+
+            try:
+                for event in chat_stream(
+                    self._messages_for_model(task_index, context),
+                    tools=tools_schema,
+                    cancel=self.cancel,
+                ):
+                    if self.cancel.is_set():
+                        yield StreamEvent("content", "\n⏹️ 用户取消")
+                        yield StreamEvent("done", {"reason": "cancelled"})
+                        return
+
+                    if event.type == "content":
+                        content_parts.append(event.data)
+                        yield event
+                    elif event.type == "tool_call":
+                        tool_calls_data.append(event.data)
+                    elif event.type == "done":
+                        if event.data and event.data.get("reason") == "cancelled":
+                            yield event
+                            return
+                    elif event.type == "error":
+                        yield event
+                        return
+            except Exception as exc:
+                log.error("[Agent:%s] LLM 调用失败：%s", self.name, exc)
+                yield StreamEvent("error", f"LLM 调用失败: {exc}")
+                yield StreamEvent("done", {"reason": "error"})
+                return
+
+            response_msg = Message(
+                role="assistant",
+                content="".join(content_parts) or None,
+                tool_calls=[
+                    ToolCall(
+                        id=tc["id"],
+                        type=tc["type"],
+                        function=FunctionCall(
+                            name=tc["name"],
+                            arguments=tc["arguments"],
+                        ),
+                    )
+                    for tc in tool_calls_data
+                ]
+                if tool_calls_data
+                else None,
+            )
+            self.conversation_history.append(response_msg)
+            budget.record_tool_calls(response_msg.tool_calls)
+
+            if not tool_calls_data:
+                yield StreamEvent("done", {"reason": "finished"})
+                return
+
+            exit_reason = budget.check()
+            if exit_reason == ExitReason.STAGNATION_DETECTED:
+                message = budget.describe_exit(exit_reason)
+                log.warning("[Agent:%s] %s", self.name, message)
+                yield StreamEvent("content", f"\n⚠️ {message}")
+                yield StreamEvent("done", {"reason": "stagnation_detected"})
+                return
+
+            for tc in tool_calls_data:
+                if self.cancel.is_set():
+                    yield StreamEvent("content", "\n⏹️ 用户取消")
+                    yield StreamEvent("done", {"reason": "cancelled"})
+                    return
+
+                yield StreamEvent("tool_call_start", {"name": tc["name"], "args": tc["arguments"]})
+                tool_call_obj = ToolCall(
+                    id=tc["id"],
+                    type="function",
+                    function=FunctionCall(name=tc["name"], arguments=tc["arguments"]),
+                )
+
+                try:
+                    result = self._exec_one(tool_call_obj)
+                    if "工具调用被拒绝" in result:
+                        yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+                        yield StreamEvent("done", {"reason": "blocked"})
+                        return
+                except ToolExecutionBlocked as exc:
+                    result = f"工具调用被拒绝: {exc}"
+                    yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+                    yield StreamEvent("done", {"reason": "blocked"})
+                    return
+
+                yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+                self.conversation_history.append(
+                    Message(role="tool", content=result, tool_call_id=tc["id"])
+                )
+
+        yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
+        yield StreamEvent("done", {"reason": "max_turns"})
+
+    def clear_history(self) -> None:
+        system_msg = self.conversation_history[0]
+        self.conversation_history.clear()
+        self.conversation_history.append(system_msg)
+        self._current_step_label = None
+        log.debug("[Agent:%s] 已清理临时 history，仅保留系统提示", self.name)
+
+    def _reset_system_prompt(self) -> None:
+        existing = [message for message in self.conversation_history if message.role != "system"]
+        self.conversation_history.clear()
+        self.conversation_history.append(Message(role="system", content=self._system_prompt))
+        self.conversation_history.extend(existing)
+
+    def _messages_for_model(self, task_index: int, context: str) -> list[Message]:
+        if not context:
+            return self.conversation_history
+        messages = list(self.conversation_history)
+        task = messages[task_index]
+        messages[task_index] = Message(
+            role=task.role,
+            content=f"{context}\n\n当前任务：{task.content}",
+            tool_calls=task.tool_calls,
+            tool_call_id=task.tool_call_id,
+        )
+        return messages
+
+    def _display_name(self) -> str:
+        if not self._current_step_label:
+            return self.name
+        return f"{self.name} [{_preview(self._current_step_label, TOOL_ACTION_PREVIEW_CHARS)}]"
+
+    def _exec_one(self, tool_call) -> str:
+        try:
+            args = json.loads(tool_call.function.arguments)
+            display_name = self._display_name()
+            log.info(
+                "[工具] %s 调用 %s：%s",
+                display_name,
+                tool_call.function.name,
+                _tool_action(tool_call.function.name, args),
+            )
+            log.debug(
+                "[工具] %s 调用 %s，参数预览：%s",
+                display_name,
+                tool_call.function.name,
+                _preview(tool_call.function.arguments),
+            )
+            started = time.perf_counter()
+            result = self.tool_registry.execute(tool_call.function.name, args)
+            elapsed = time.perf_counter() - started
+            log.debug(
+                "[工具] %s 调用 %s 完成，用时 %.2f 秒",
+                display_name,
+                tool_call.function.name,
+                elapsed,
+            )
+            if _is_tool_error_result(result):
+                log.warning(
+                    "[工具错误] %s 调用 %s：%s",
+                    display_name,
+                    tool_call.function.name,
+                    _preview(result, 800),
+                )
+            return result
+        except ToolExecutionBlocked:
+            log.info("[工具] %s 调用 %s 被拒绝", self._display_name(), tool_call.function.name)
+            raise
+        except Exception as exc:
+            log.error("[工具] %s 调用 %s 失败：%s", self._display_name(), tool_call.function.name, exc)
+            return f"工具执行失败: {exc}"
+
+    def __repr__(self) -> str:
+        return f"AgentLoop(name={self.name!r}, history={len(self.conversation_history)})"

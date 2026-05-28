@@ -3,8 +3,8 @@
 对齐 paicli 设计核心：
 - 两类执行角色：PLANNER（规划者）/ WORKER（执行者）
 - 主从架构：Orchestrator 编排，SubAgent 执行
-- 完整 ReAct 循环（Worker 调工具 + 工具结果回灌 + 多轮迭代）
-- AgentBudget 三道防护：token 预算 + 停滞检测 + 硬轮数
+- 复用 agent.AgentLoop（Worker 调工具 + 工具结果回灌 + 多轮迭代）
+- 复用 agent.AgentBudget 三道防护：token 预算 + 停滞检测 + 硬轮数
 - 并行执行：asyncio.Semaphore + Queue 池化，独立缓冲按顺序 flush
 - 二级 JSON 解析容错（关键词兜底）
 - Memory 集成（写用户输入 / 助手回复 / LLM 调用前压缩历史）
@@ -13,8 +13,8 @@
 文件结构：
 - roles.py        AgentRole 枚举
 - messages.py     AgentMessage + MessageType + 静态工厂
-- budget.py       AgentBudget 三道防护
-- sub_agent.py    SubAgent 含完整 ReAct 循环
+- budget.py       agent.budget 兼容导出
+- sub_agent.py    legacy SubAgent 角色包装，底层复用 agent.AgentLoop
 - planning_phase.py 规划阶段：生成/解析/审查计划
 - execution_phase.py 执行阶段：单步 Worker 执行
 - orchestrator.py AgentOrchestrator 编排 + 并行池化
@@ -25,10 +25,10 @@
     from multi_agent import AgentOrchestrator
     from memory_pythonic import MemoryManager
     from llm.client import chat
-    from tooling import ExecuteCommandTool, ListDirTool, ReadFileTool, ToolRegistry, WriteFileTool
+    from tooling import BashTool, LsTool, ReadTool, ToolRegistry, WriteTool
 
     registry = ToolRegistry()
-    for tool in [ReadFileTool(), WriteFileTool(), ListDirTool(), ExecuteCommandTool()]:
+    for tool in [ReadTool(), WriteTool(), LsTool(), BashTool()]:
         registry.register(tool)
 
     mgr = MemoryManager()
@@ -59,6 +59,7 @@ from .plan_types import (
 )
 from .planning_phase import PlanningPhase, PlanningResult
 from .roles import AgentRole
+from .scheduler import PlanScheduler
 from .sub_agent import ChatFn, SubAgent
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "PlanReviewFn",
     "PlanningPhase",
     "PlanningResult",
+    "PlanScheduler",
     "StepStatus",
     "SubAgent",
     "parse_plan_review_input",

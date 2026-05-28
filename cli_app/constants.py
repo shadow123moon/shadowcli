@@ -5,15 +5,15 @@ BANNER = """
   PaiCLI Python 重写版 — 交互终端
 ==================================================
 输入自然语言任务,回车执行。
-/help  查看命令    /plan  多 Agent 规划执行    /memory  记忆状态    /quit  退出
+/help  查看命令    /plan  单 Agent 计划执行    /memory  记忆状态    /quit  退出
 """
 
 HELP = """
 命令:
   /help    显示本帮助
   /tools   列出已注册的工具
-  /plan    多 Agent 规划执行,用法: /plan <任务>。执行完成后保存日志到 logs/plans/
-  /memory  显示当前短期/长期记忆状态
+  /plan    单 Agent 计划执行,用法: /plan <任务>
+  /memory  显示当前长期记忆状态
   /remember <事实>  写入一条长期记忆
   /quit    退出 (也可 Ctrl+C / Ctrl+D)
 

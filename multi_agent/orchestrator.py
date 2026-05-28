@@ -32,6 +32,7 @@ from .execution_phase import ExecutionPhase
 from .plan_types import ExecutionStep, PlanReviewFn, StepStatus
 from .planning_phase import PlanningPhase
 from .roles import AgentRole
+from .scheduler import PlanScheduler
 from .sub_agent import ChatFn, SubAgent
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ class AgentOrchestrator:
         self.memory_manager = memory_manager
         self.cancel = cancel or threading.Event()
         self.worker_count = max(1, worker_count)
+        self.scheduler = PlanScheduler()
 
         self.planner = SubAgent(
             "planner", AgentRole.PLANNER, chat, tool_registry,
@@ -162,12 +164,7 @@ class AgentOrchestrator:
         return 1 + len(self.workers)
 
     def _get_executable_steps(self, steps: list[ExecutionStep]) -> list[ExecutionStep]:
-        status_map = {s.id: s.status for s in steps}
-        return [
-            s for s in steps
-            if s.is_pending
-            and all(status_map.get(dep) == StepStatus.COMPLETED for dep in s.dependencies)
-        ]
+        return self.scheduler.next_batch(steps)
 
     async def _run_batch_parallel(
         self,

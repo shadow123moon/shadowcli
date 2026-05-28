@@ -134,15 +134,24 @@ def _parse_plan(plan_json: str) -> list[ExecutionStep]:
             id=new_id,
             description=str(s.get("description", "")),
             type=str(s.get("type", "COMMAND")),
+            reads=_as_str_list(s.get("reads")),
+            writes=_as_str_list(s.get("writes")),
             dependencies=[],
         ))
 
     for i, s in enumerate(steps_data):
-        deps = s.get("dependencies") or []
-        if isinstance(deps, list):
-            steps[i].dependencies = [id_mapping.get(str(d), str(d)) for d in deps]
+        deps = _as_str_list(s.get("dependencies"))
+        steps[i].dependencies = [id_mapping.get(str(d), str(d)) for d in deps]
 
     return steps
+
+
+def _as_str_list(value) -> list[str]:
+    if value is None or value == "":
+        return []
+    if not isinstance(value, list):
+        value = [value]
+    return [str(item) for item in value if str(item)]
 
 
 def _summarize_steps(steps: list[ExecutionStep]) -> str:
@@ -150,5 +159,11 @@ def _summarize_steps(steps: list[ExecutionStep]) -> str:
     for s in steps:
         deps = ", ".join(s.dependencies) if s.dependencies else "无"
         icon = "✅" if s.is_completed else "⏳"
-        lines.append(f"  {icon} [{s.id}] {s.description} (依赖: {deps})")
+        boundaries = []
+        if s.reads:
+            boundaries.append(f"读: {', '.join(s.reads)}")
+        if s.writes:
+            boundaries.append(f"写: {', '.join(s.writes)}")
+        boundary_text = f"；{'; '.join(boundaries)}" if boundaries else ""
+        lines.append(f"  {icon} [{s.id}] {s.description} (依赖: {deps}{boundary_text})")
     return "\n".join(lines)

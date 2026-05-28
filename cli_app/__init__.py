@@ -16,9 +16,7 @@ from .constants import (
 from .factories import (
     build_agent,
     build_memory,
-    build_plan_agent,
     build_registry,
-    default_plan_review_handler,
     list_tools,
 )
 from .logging_config import configure_logging
@@ -38,8 +36,6 @@ __all__ = [
     "list_tools",
     "build_memory",
     "build_agent",
-    "default_plan_review_handler",
-    "build_plan_agent",
     "parse_plan_command",
     "parse_remember_command",
     "handle_remember",
