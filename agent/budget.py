@@ -73,11 +73,14 @@ class AgentBudget:
     def check(self) -> ExitReason:
         if self._stagnant:
             return ExitReason.STAGNATION_DETECTED
-        if self.total_input_tokens + self.total_output_tokens >= self.token_budget:
+        if self.is_token_budget_exceeded():
             return ExitReason.TOKEN_BUDGET_EXCEEDED
         if self.iteration >= self.hard_max_iterations:
             return ExitReason.HARD_ITERATION_LIMIT
         return ExitReason.WITHIN_BUDGET
+
+    def is_token_budget_exceeded(self) -> bool:
+        return self.total_input_tokens + self.total_output_tokens >= self.token_budget
 
     def describe_exit(self, reason: ExitReason) -> str:
         return {

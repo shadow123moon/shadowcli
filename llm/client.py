@@ -2,14 +2,11 @@ import os
 import threading
 from typing import Literal, Any
 
-from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic.dataclasses import dataclass
 import requests
 
 from llm.types import ChatResponse, FunctionCall, Message, ToolCall
-
-load_dotenv()
 
 @dataclass
 class StreamEvent:
@@ -90,9 +87,11 @@ def chat_stream(
         messages=[_message_to_dict(m) for m in messages],
         tools=tools,
         stream=True,
+        stream_options={"include_usage": True},
     )
 
     tool_calls_buffer = {}
+    usage_data = None
     try:
         for chunk in stream:
             # 检查取消
@@ -100,6 +99,9 @@ def chat_stream(
                 yield StreamEvent("content", "\n⏹️ 已取消")
                 yield StreamEvent("done", {"reason": "cancelled"})
                 return
+
+            if getattr(chunk, "usage", None):
+                usage_data = _usage_to_dict(chunk.usage)
 
             if not chunk.choices:
                 continue
@@ -146,7 +148,32 @@ def chat_stream(
                 "arguments": tc["function"]["arguments"],
             })
 
-    yield StreamEvent("done", None)
+    yield StreamEvent("done", {"usage": usage_data} if usage_data else None)
+
+
+def _usage_to_dict(usage) -> dict:
+    if isinstance(usage, dict):
+        return usage
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+        "completion_tokens": getattr(usage, "completion_tokens", 0),
+        "total_tokens": getattr(usage, "total_tokens", 0),
+        "prompt_tokens_details": _usage_details_to_dict(
+            getattr(usage, "prompt_tokens_details", None)
+        ),
+    }
+
+
+def _usage_details_to_dict(details) -> dict:
+    if details is None:
+        return {}
+    if isinstance(details, dict):
+        return details
+    if hasattr(details, "model_dump"):
+        return details.model_dump()
+    return {"cached_tokens": getattr(details, "cached_tokens", 0)}
 
 def _message_to_dict(message: Message) -> dict:
     node = {"role": message.role, "content": message.content}

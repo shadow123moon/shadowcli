@@ -88,6 +88,7 @@ class AgentLoop:
 
             content_parts: list[str] = []
             tool_calls_data: list[dict] = []
+            usage_data: dict | None = None
 
             try:
                 for event in chat_stream(
@@ -106,9 +107,12 @@ class AgentLoop:
                     elif event.type == "tool_call":
                         tool_calls_data.append(event.data)
                     elif event.type == "done":
-                        if event.data and event.data.get("reason") == "cancelled":
-                            yield event
-                            return
+                        if event.data:
+                            if event.data.get("usage"):
+                                usage_data = event.data["usage"]
+                            if event.data.get("reason") == "cancelled":
+                                yield event
+                                return
                     elif event.type == "error":
                         yield event
                         return
@@ -136,18 +140,20 @@ class AgentLoop:
                 else None,
             )
             self._append_message(response_msg)
+            _record_usage(budget, usage_data)
             budget.record_tool_calls(response_msg.tool_calls)
+
+            if budget.is_token_budget_exceeded():
+                yield from _budget_exit_events(self.name, budget, ExitReason.TOKEN_BUDGET_EXCEEDED)
+                return
 
             if not tool_calls_data:
                 yield StreamEvent("done", {"reason": "finished"})
                 return
 
             exit_reason = budget.check()
-            if exit_reason == ExitReason.STAGNATION_DETECTED:
-                message = budget.describe_exit(exit_reason)
-                log.warning("[Agent:%s] %s", self.name, message)
-                yield StreamEvent("content", f"\n⚠️ {message}")
-                yield StreamEvent("done", {"reason": "stagnation_detected"})
+            if exit_reason != ExitReason.WITHIN_BUDGET:
+                yield from _budget_exit_events(self.name, budget, exit_reason)
                 return
 
             for tc in tool_calls_data:
@@ -238,3 +244,30 @@ class AgentLoop:
 
     def __repr__(self) -> str:
         return f"AgentLoop(name={self.name!r}, history={len(self.conversation_history)})"
+
+
+def _record_usage(budget: AgentBudget, usage: dict | None) -> None:
+    if not usage:
+        return
+    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or usage.get("cached_input_tokens") or 0)
+    budget.record_tokens(input_tokens, output_tokens, cached=cached)
+
+
+def _budget_exit_events(agent_name: str, budget: AgentBudget, reason: ExitReason):
+    from llm.client import StreamEvent
+
+    message = budget.describe_exit(reason)
+    log.warning("[Agent:%s] %s", agent_name, message)
+    yield StreamEvent("content", f"\n⚠️ {message}")
+    yield StreamEvent("done", {"reason": _budget_done_reason(reason)})
+
+
+def _budget_done_reason(reason: ExitReason) -> str:
+    return {
+        ExitReason.TOKEN_BUDGET_EXCEEDED: "token_budget_exceeded",
+        ExitReason.STAGNATION_DETECTED: "stagnation_detected",
+        ExitReason.HARD_ITERATION_LIMIT: "hard_iteration_limit",
+    }.get(reason, "finished")

@@ -1,6 +1,6 @@
-from sessions import BranchSummaryEntry, CompactionEntry, MessageEntry, SessionManager, TextLongTermMemory
+from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager, TextLongTermMemory
 
-from .constants import JUMP_COMMAND, MEMORY_COMMAND, PLAN_COMMAND, REMEMBER_COMMAND, TREE_COMMAND
+from .constants import COMPACT_COMMAND, JUMP_COMMAND, MEMORY_COMMAND, PLAN_COMMAND, REMEMBER_COMMAND, TREE_COMMAND
 
 
 TREE_PREVIEW_CHARS = 80
@@ -37,6 +37,13 @@ def parse_jump_command(user_input: str) -> str | None:
     return None
 
 
+def parse_compact_command(user_input: str) -> str | None:
+    stripped = user_input.strip()
+    if stripped == COMPACT_COMMAND:
+        return ""
+    return None
+
+
 def handle_remember(memory: TextLongTermMemory, user_input: str) -> str:
     fact = parse_remember_command(user_input)
     if fact is None:
@@ -70,6 +77,17 @@ def format_session_tree(session: SessionManager, *, limit: int = 20) -> str:
             f"{in_branch} {entry.id} {entry_label(entry):<14} {entry_preview(entry)}{current}"
         )
     return "\n".join(lines)
+
+
+def format_compaction_result(result: CompactionResult) -> str:
+    if not result.compacted or result.entry is None or result.plan is None:
+        return f"未压缩: {result.reason}"
+    return "\n".join([
+        "已压缩当前会话分支。",
+        f"摘要节点: {result.entry.id}",
+        f"保留起点: {result.entry.first_kept_entry_id}",
+        f"压缩前估算 tokens: {result.entry.tokens_before}",
+    ])
 
 
 def entry_label(entry) -> str:

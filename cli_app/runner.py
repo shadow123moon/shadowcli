@@ -7,13 +7,16 @@ from collections.abc import Callable
 from dotenv import load_dotenv
 
 from agent import ReactAgent
+from llm import chat
 from mcp_integration import load_mcp_config, McpServerManager, McpToolWrapper
-from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
+from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
 from sessions.summarizer import generate_branch_summary
 from .commands import (
+    format_compaction_result,
     format_session_tree,
     format_memory_status,
     handle_remember,
+    parse_compact_command,
     parse_jump_command,
     parse_plan_command,
     parse_remember_command,
@@ -24,10 +27,9 @@ from .factories import build_agent, build_long_term_memory, build_registry, list
 from .logging_config import configure_logging
 from ui import (
     BranchNavigationChoice,
+    Renderer,
+    TerminalRenderer,
     ask_branch_navigation_choice,
-    print_cancel_requested,
-    print_message,
-    render_agent_event,
 )
 
 log = logging.getLogger(__name__)
@@ -39,23 +41,25 @@ def run_once(
     *,
     plan_log_dir: Path | None = None,
     runtime_context_builder: RuntimeContextBuilder | None = None,
+    renderer: Renderer | None = None,
 ) -> None:
     _ = plan_log_dir
+    renderer = renderer or TerminalRenderer()
     try:
         plan_input = parse_plan_command(user_input)
         if plan_input is not None:
             if not plan_input:
-                print_message("用法: /plan <任务>")
+                renderer.message("用法: /plan <任务>")
                 return
             context = runtime_context_builder.build(plan_input) if runtime_context_builder is not None else ""
-            _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context)
+            _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context, renderer=renderer)
         else:
             context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
-            _run_agent_events(agent, user_input, context=context)
+            _run_agent_events(agent, user_input, context=context, renderer=renderer)
             # React 模式：已经流式打印，不再重复输出
     except Exception as e:
         log.exception("[入口] 执行失败")
-        print_message(f"\n[ERROR] 执行失败: {e}")
+        renderer.message(f"\n[ERROR] 执行失败: {e}")
         return
 
 
@@ -68,17 +72,23 @@ def _single_agent_plan_prompt(task: str) -> str:
     ])
 
 
-def _run_agent_events(agent: ReactAgent, user_input: str, *, context: str = "") -> str:
+def _run_agent_events(
+    agent: ReactAgent,
+    user_input: str,
+    *,
+    context: str = "",
+    renderer: Renderer,
+) -> str:
     content_parts: list[str] = []
     try:
         for event in agent.events(user_input, context=context):
             if event.type == "content":
                 content_parts.append(event.data)
-            render_agent_event(event, agent_name="react")
+            renderer.agent_event(event, agent_name="react")
             if event.type == "done":
                 break
     except KeyboardInterrupt:
-        print_cancel_requested()
+        renderer.cancel_requested()
         agent.cancel()
         return "".join(content_parts) + "\n[已中止]"
     return "".join(content_parts)
@@ -112,7 +122,30 @@ def reload_agent_conversation(agent: ReactAgent, session: SessionManager) -> Non
         agent.replace_conversation_messages(session.messages())
 
 
-def repl() -> int:
+def maybe_compact_before_run(
+    session: SessionManager,
+    agent: ReactAgent,
+    long_term,
+    runtime_context_builder: RuntimeContextBuilder,
+    renderer: Renderer,
+) -> RuntimeContextBuilder:
+    try:
+        result = compact_session(session, force=False, chat_fn=chat)
+    except Exception as e:
+        log.exception("[会话压缩] 自动压缩失败")
+        renderer.message(f"[WARN] 自动压缩失败，继续使用未压缩上下文: {e}")
+        return runtime_context_builder
+
+    if not result.compacted:
+        return runtime_context_builder
+
+    reload_agent_conversation(agent, session)
+    renderer.message(format_compaction_result(result))
+    return RuntimeContextBuilder(session=session, long_term=long_term)
+
+
+def repl(renderer: Renderer | None = None) -> int:
+    renderer = renderer or TerminalRenderer()
     load_dotenv()
     configure_logging()
     runtime = build_registry()
@@ -144,9 +177,9 @@ def repl() -> int:
             log.exception("MCP server '%s' failed", name)
 
     if mcp_loaded > 0:
-        print_message(f"✓ 已加载 {mcp_loaded} 个 MCP server")
+        renderer.message(f"✓ 已加载 {mcp_loaded} 个 MCP server")
     if mcp_failed > 0:
-        print_message(f"✗ {mcp_failed} 个 MCP server 启动失败")
+        renderer.message(f"✗ {mcp_failed} 个 MCP server 启动失败")
 
     agent = build_agent(
         runtime,
@@ -155,66 +188,87 @@ def repl() -> int:
     )
     runtime_context_builder = RuntimeContextBuilder(session=session, long_term=long_term)
 
-    print_message(BANNER)
+    renderer.message(BANNER)
 
     try:
         while True:
             try:
                 line = input("\n> ").strip()
             except (EOFError, KeyboardInterrupt):
-                print_message("\n再见。")
+                renderer.message("\n再见。")
                 break
 
             if not line:
                 continue
             if line in ("/quit", "/exit", "/q"):
-                print_message("再见。")
+                renderer.message("再见。")
                 break
             if line == "/help":
-                print_message(HELP)
+                renderer.message(HELP)
                 continue
             if line == "/tools":
-                print_message(list_tools(runtime))
+                renderer.message(list_tools(runtime))
                 continue
             if line == MEMORY_COMMAND:
-                print_message(format_memory_status(long_term))
+                renderer.message(format_memory_status(long_term))
                 continue
             if parse_tree_command(line):
-                print_message(format_session_tree(session))
+                renderer.message(format_session_tree(session))
+                continue
+            if parse_compact_command(line) is not None:
+                result = compact_session(session, force=True, chat_fn=chat)
+                if result.compacted:
+                    reload_agent_conversation(agent, session)
+                    runtime_context_builder = RuntimeContextBuilder(session=session, long_term=long_term)
+                renderer.message(format_compaction_result(result))
                 continue
             jump_target = parse_jump_command(line)
             if jump_target is not None:
                 if not jump_target:
-                    print_message("用法: /jump <entry_id>")
+                    renderer.message("用法: /jump <entry_id>")
                     continue
                 try:
                     choice = navigate_session_branch(
                         session,
                         jump_target,
-                        choose_navigation=ask_branch_navigation_choice,
+                        choose_navigation=renderer.branch_navigation_choice,
                         build_branch_summary=generate_branch_summary,
                     )
                 except KeyError:
-                    print_message(f"未找到会话节点: {jump_target}")
+                    renderer.message(f"未找到会话节点: {jump_target}")
                     continue
                 if choice != BranchNavigationChoice.CANCEL:
                     reload_agent_conversation(agent, session)
                     runtime_context_builder = RuntimeContextBuilder(session=session, long_term=long_term)
-                    print_message(f"已跳转到: {session.get_leaf_id()}")
+                    renderer.message(f"已跳转到: {session.get_leaf_id()}")
                 else:
-                    print_message("已取消跳转。")
+                    renderer.message("已取消跳转。")
                 continue
             if parse_remember_command(line) is not None:
-                print_message(handle_remember(long_term, line))
+                renderer.message(handle_remember(long_term, line))
                 continue
             if parse_plan_command(line) is not None:
-                run_once(agent, line, runtime_context_builder=runtime_context_builder)
+                runtime_context_builder = maybe_compact_before_run(
+                    session,
+                    agent,
+                    long_term,
+                    runtime_context_builder,
+                    renderer,
+                )
+                run_once(agent, line, runtime_context_builder=runtime_context_builder, renderer=renderer)
                 continue
             if line.startswith("/"):
-                print_message(f"未知命令: {line}  (输入 /help 查看)")
+                renderer.message(f"未知命令: {line}  (输入 /help 查看)")
                 continue
 
-            run_once(agent, line, runtime_context_builder=runtime_context_builder)
+            runtime_context_builder = maybe_compact_before_run(
+                session,
+                agent,
+                long_term,
+                runtime_context_builder,
+                renderer,
+            )
+            run_once(agent, line, runtime_context_builder=runtime_context_builder, renderer=renderer)
     finally:
         # 清理 MCP 资源
         log.debug("Shutting down MCP servers...")

@@ -5,16 +5,25 @@
 - 未来切换到事件总线 / TUI 库（rich 等）
 - 避免业务模块反向依赖 cli_app
 """
-from enum import Enum
 from typing import TextIO
+
+from .renderer import BranchNavigationChoice
 
 COMMAND_OUTPUT_PREVIEW_CHARS = 4000
 
 
-class BranchNavigationChoice(str, Enum):
-    DIRECT = "direct"
-    SUMMARIZE = "summarize"
-    CANCEL = "cancel"
+class TerminalRenderer:
+    def message(self, message: str) -> None:
+        print_message(message)
+
+    def agent_event(self, event, *, agent_name: str = "react") -> None:
+        render_agent_event(event, agent_name=agent_name)
+
+    def cancel_requested(self) -> None:
+        print_cancel_requested()
+
+    def branch_navigation_choice(self, plan=None) -> BranchNavigationChoice:
+        return ask_branch_navigation_choice(plan)
 
 
 def _write(message: str, out: TextIO | None = None, *, end: str = "\n", flush: bool = False) -> None:

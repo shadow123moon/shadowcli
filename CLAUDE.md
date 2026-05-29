@@ -56,7 +56,7 @@ LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `
 ## 已知问题(当前快照)
 
 - LLM 客户端已拆到 `llm/client.py`，消息/响应模型放在 `llm/types.py`。
-- 短期 memory / JSON 长期记忆 / tokenizer 已退出主路径；会话事实在 session 树里，长期事实在 `long_term.md`。
+- 短期 memory / JSON 长期记忆已退出主路径；会话事实在 session 树里，长期事实在 `long_term.md`，压缩 token 估算优先使用 `tiktoken`。
 - 根目录旧入口/兼容文件已删除；Plan / Task / Planner 统一放在 `planning/`。
 
 ## LSP / 类型检查

@@ -1,7 +1,9 @@
 from .commands import (
     format_session_tree,
+    format_compaction_result,
     format_memory_status,
     handle_remember,
+    parse_compact_command,
     parse_jump_command,
     parse_plan_command,
     parse_remember_command,
@@ -16,6 +18,7 @@ from .constants import (
     REMEMBER_COMMAND,
     TREE_COMMAND,
     JUMP_COMMAND,
+    COMPACT_COMMAND,
 )
 from .factories import (
     build_agent,
@@ -34,6 +37,7 @@ __all__ = [
     "MEMORY_COMMAND",
     "TREE_COMMAND",
     "JUMP_COMMAND",
+    "COMPACT_COMMAND",
     "DEFAULT_LONG_TERM_PATH",
     "configure_logging",
     "build_registry",
@@ -44,9 +48,11 @@ __all__ = [
     "parse_remember_command",
     "parse_tree_command",
     "parse_jump_command",
+    "parse_compact_command",
     "handle_remember",
     "format_memory_status",
     "format_session_tree",
+    "format_compaction_result",
     "navigate_session_branch",
     "run_once",
     "repl",
