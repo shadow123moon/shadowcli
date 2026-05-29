@@ -5,7 +5,7 @@ BANNER = """
   PaiCLI Python 重写版 — 交互终端
 ==================================================
 输入自然语言任务,回车执行。
-/help  查看命令    /plan  单 Agent 计划执行    /memory  记忆状态    /quit  退出
+/help  查看命令    /plan  单 Agent 计划执行    /tree  会话树    /quit  退出
 """
 
 HELP = """
@@ -15,6 +15,8 @@ HELP = """
   /plan    单 Agent 计划执行,用法: /plan <任务>
   /memory  显示当前长期记忆状态
   /remember <事实>  写入一条长期记忆
+  /tree    显示最近会话节点
+  /jump <entry_id>  跳转到旧消息
   /quit    退出 (也可 Ctrl+C / Ctrl+D)
 
 示例任务:
@@ -28,6 +30,6 @@ HELP = """
 PLAN_COMMAND = "/plan"
 REMEMBER_COMMAND = "/remember"
 MEMORY_COMMAND = "/memory"
-DEFAULT_LONG_TERM_PATH = Path("agent_memory") / "long_term_memory.json"
-DEFAULT_PLAN_LOG_DIR = Path("logs") / "plans"
-PLAN_LOG_FILENAME_LIMIT = 40
+TREE_COMMAND = "/tree"
+JUMP_COMMAND = "/jump"
+DEFAULT_LONG_TERM_PATH = Path("agent_memory") / "long_term.md"

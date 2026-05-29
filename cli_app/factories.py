@@ -1,9 +1,11 @@
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from agent import ReactAgent
 from extensions.tool_runtime import ToolRuntime
-from memory_pythonic import MemoryManager
+from llm import Message
+from sessions import TextLongTermMemory
 from tooling import (
     BashTool,
     EditTool,
@@ -64,13 +66,18 @@ def list_tools(registry: ToolRuntime) -> str:
     return "\n".join(lines)
 
 
-def build_memory(long_term_path: Path | None = None) -> MemoryManager:
-    return MemoryManager(long_term_path=long_term_path or DEFAULT_LONG_TERM_PATH)
+def build_long_term_memory(long_term_path: Path | None = None) -> TextLongTermMemory:
+    return TextLongTermMemory(long_term_path or DEFAULT_LONG_TERM_PATH)
 
 
 def build_agent(
     registry: ToolRegistry,
-    memory: MemoryManager | None = None,
-    session_messages=None,
+    *,
+    conversation_messages: list[Message] | None = None,
+    on_message_appended: Callable[[Message], None] | None = None,
 ) -> ReactAgent:
-    return ReactAgent(registry, memory_manager=memory, session_messages=session_messages)
+    return ReactAgent(
+        registry,
+        conversation_messages=conversation_messages,
+        on_message_appended=on_message_appended,
+    )

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import time
 from typing import Callable
 
 from extensions.tool_runtime import ToolExecutionBlocked
@@ -27,6 +26,7 @@ TOOL_ERROR_PREFIXES = (
 )
 
 ChatFn = Callable[..., object]
+MessageSink = Callable[[Message], None]
 
 
 def _preview(text: str, limit: int = 160) -> str:
@@ -34,25 +34,6 @@ def _preview(text: str, limit: int = 160) -> str:
     if len(compact) <= limit:
         return compact
     return compact[:limit] + "..."
-
-
-def _tool_action(tool_name: str, args: dict) -> str:
-    if tool_name == "bash":
-        return f"执行命令：{_preview(args.get('command', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    if tool_name == "read":
-        return f"读取文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    if tool_name == "write":
-        content = args.get("content", "")
-        return f"写入文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}，内容 {len(content or '')} 字"
-    if tool_name == "edit":
-        return f"编辑文件：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    if tool_name == "ls":
-        return f"列出目录：{_preview(args.get('path', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    if tool_name == "grep":
-        return f"搜索文本：{_preview(args.get('pattern', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    if tool_name == "find":
-        return f"查找文件：{_preview(args.get('name', ''), TOOL_ACTION_PREVIEW_CHARS)}"
-    return f"参数：{_preview(json.dumps(args, ensure_ascii=False), TOOL_ACTION_PREVIEW_CHARS)}"
 
 
 def _is_tool_error_result(result: str | None) -> bool:
@@ -72,6 +53,7 @@ class AgentLoop:
         *,
         cancel: threading.Event | None = None,
         conversation_history: list[Message] | None = None,
+        on_message_appended: MessageSink | None = None,
         use_tools: bool = True,
     ):
         self.name = name
@@ -79,6 +61,7 @@ class AgentLoop:
         self.tool_registry = tool_registry
         self.cancel = cancel or threading.Event()
         self.conversation_history = conversation_history if conversation_history is not None else []
+        self.on_message_appended = on_message_appended
         self.use_tools = use_tools
         self._system_prompt = system_prompt
         self._current_step_label: str | None = None
@@ -89,7 +72,7 @@ class AgentLoop:
         from llm.client import StreamEvent
 
         task_index = len(self.conversation_history)
-        self.conversation_history.append(Message(role="user", content=task.content))
+        self._append_message(Message(role="user", content=task.content))
         budget = AgentBudget.from_env()
 
         for _turn in range(budget.hard_max_iterations):
@@ -130,7 +113,7 @@ class AgentLoop:
                         yield event
                         return
             except Exception as exc:
-                log.error("[Agent:%s] LLM 调用失败：%s", self.name, exc)
+                log.exception("[Agent:%s] LLM 调用失败", self.name)
                 yield StreamEvent("error", f"LLM 调用失败: {exc}")
                 yield StreamEvent("done", {"reason": "error"})
                 return
@@ -152,7 +135,7 @@ class AgentLoop:
                 if tool_calls_data
                 else None,
             )
-            self.conversation_history.append(response_msg)
+            self._append_message(response_msg)
             budget.record_tool_calls(response_msg.tool_calls)
 
             if not tool_calls_data:
@@ -193,9 +176,7 @@ class AgentLoop:
                     return
 
                 yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-                self.conversation_history.append(
-                    Message(role="tool", content=result, tool_call_id=tc["id"])
-                )
+                self._append_message(Message(role="tool", content=result, tool_call_id=tc["id"]))
 
         yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
         yield StreamEvent("done", {"reason": "max_turns"})
@@ -205,7 +186,6 @@ class AgentLoop:
         self.conversation_history.clear()
         self.conversation_history.append(system_msg)
         self._current_step_label = None
-        log.debug("[Agent:%s] 已清理临时 history，仅保留系统提示", self.name)
 
     def _reset_system_prompt(self) -> None:
         existing = [message for message in self.conversation_history if message.role != "system"]
@@ -226,6 +206,11 @@ class AgentLoop:
         )
         return messages
 
+    def _append_message(self, message: Message) -> None:
+        self.conversation_history.append(message)
+        if self.on_message_appended is not None and message.role != "system":
+            self.on_message_appended(message)
+
     def _display_name(self) -> str:
         if not self._current_step_label:
             return self.name
@@ -235,27 +220,7 @@ class AgentLoop:
         try:
             args = json.loads(tool_call.function.arguments)
             display_name = self._display_name()
-            log.info(
-                "[工具] %s 调用 %s：%s",
-                display_name,
-                tool_call.function.name,
-                _tool_action(tool_call.function.name, args),
-            )
-            log.debug(
-                "[工具] %s 调用 %s，参数预览：%s",
-                display_name,
-                tool_call.function.name,
-                _preview(tool_call.function.arguments),
-            )
-            started = time.perf_counter()
             result = self.tool_registry.execute(tool_call.function.name, args)
-            elapsed = time.perf_counter() - started
-            log.debug(
-                "[工具] %s 调用 %s 完成，用时 %.2f 秒",
-                display_name,
-                tool_call.function.name,
-                elapsed,
-            )
             if _is_tool_error_result(result):
                 log.warning(
                     "[工具错误] %s 调用 %s：%s",
@@ -265,10 +230,10 @@ class AgentLoop:
                 )
             return result
         except ToolExecutionBlocked:
-            log.info("[工具] %s 调用 %s 被拒绝", self._display_name(), tool_call.function.name)
+            log.warning("[工具] %s 调用 %s 被拒绝", self._display_name(), tool_call.function.name)
             raise
         except Exception as exc:
-            log.error("[工具] %s 调用 %s 失败：%s", self._display_name(), tool_call.function.name, exc)
+            log.exception("[工具] %s 调用 %s 失败", self._display_name(), tool_call.function.name)
             return f"工具执行失败: {exc}"
 
     def __repr__(self) -> str:

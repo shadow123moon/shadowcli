@@ -14,9 +14,17 @@ __pycache__/
 .vscode/
 .claude/settings.local.json
 
+# 排除测试、文档、调试、日志
 tests/
-
-agent_memory/*.json
+docs/
+debug/
 logs/
+*.log
+
+# 临时文件
 hello.txt
 output.txt
+nul
+*.zip
+
+agent_memory/*.json

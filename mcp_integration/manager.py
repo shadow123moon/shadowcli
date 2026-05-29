@@ -122,7 +122,7 @@ class McpServerManager:
                 self.servers[name] = session
                 stop_event = asyncio.Event()
                 self.stop_events[name] = stop_event
-                log.info(f"MCP server '{name}' started")
+                log.debug("MCP server '%s' started", name)
 
                 # 获取工具列表
                 result = await session.list_tools()
@@ -140,16 +140,14 @@ class McpServerManager:
                 await stop_event.wait()
         except Exception as e:
             if ready.done():
-                log.error(f"MCP server '{name}' failed: {e}")
-            else:
-                log.error(f"Failed to start MCP server '{name}': {e}")
+                log.exception("MCP server '%s' failed", name)
             if not ready.done():
                 ready.set_exception(e)
         finally:
             self.servers.pop(name, None)
             self.exit_stacks.pop(name, None)
             self.stop_events.pop(name, None)
-            log.info(f"MCP server '{name}' closed")
+            log.debug("MCP server '%s' closed", name)
 
     def call_tool_sync(
         self,
@@ -215,8 +213,8 @@ class McpServerManager:
             future.result(timeout=10)
         except FutureTimeoutError:
             log.error("Error during shutdown: timeout")
-        except Exception as e:
-            log.error(f"Error during shutdown: {e}")
+        except Exception:
+            log.exception("Error during shutdown")
 
         try:
             self.loop.call_soon_threadsafe(self.loop.stop)
@@ -230,8 +228,8 @@ class McpServerManager:
         if loop is not None and not loop.is_closed():
             try:
                 loop.close()
-            except Exception as e:
-                log.error(f"Error closing MCP event loop: {e}")
+            except Exception:
+                log.exception("Error closing MCP event loop")
 
         self.loop = None
         self.loop_thread = None

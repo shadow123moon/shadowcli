@@ -4,10 +4,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from llm import Message
-
-from .codec import entry_to_message, message_to_entry, session_header
 from .ids import new_session_id, project_key_for
+from .long_term import DEFAULT_LONG_TERM_NAME
+from .manager import SessionManager
+from .repository import SessionRepository
 from .types import ProjectMeta, SESSION_VERSION, SessionMeta
 
 
@@ -15,6 +15,8 @@ DEFAULT_SESSION_ROOT = Path.home() / ".pai_cli" / "sessions"
 
 
 class SessionStore:
+    """Project-scoped session directory manager."""
+
     def __init__(self, root: Path = DEFAULT_SESSION_ROOT):
         self.root = Path(root)
 
@@ -28,7 +30,7 @@ class SessionStore:
         title: str | None = None,
         model: str | None = None,
         provider: str | None = None,
-    ) -> Session:
+    ) -> SessionManager:
         project_dir = self._ensure_project(cwd)
         session_id = new_session_id()
         created_at = _now_iso()
@@ -46,22 +48,33 @@ class SessionStore:
             message_count=0,
         )
         _write_json(path / "meta.json", meta.to_dict())
-        (path / "summary.md").write_text("", encoding="utf-8")
-        _append_jsonl(
-            path / "messages.jsonl",
-            session_header(session_id, str(Path(cwd).expanduser().resolve()), created_at),
+        repository = SessionRepository(path)
+        repository.initialize(
+            session_id=session_id,
+            cwd=str(Path(cwd).expanduser().resolve()),
+            created_at=created_at,
         )
-        return Session(path=path, cwd=Path(cwd).expanduser().resolve(), meta=meta)
+        return SessionManager(
+            path=path,
+            cwd=Path(cwd).expanduser().resolve(),
+            meta=meta,
+            repository=repository,
+        )
 
-    def open(self, cwd: Path, session_id: str) -> Session:
+    def open(self, cwd: Path, session_id: str) -> SessionManager:
         project_dir = self.project_dir(cwd)
         path = project_dir / "conversations" / session_id
         if not path.exists():
             raise FileNotFoundError(f"session not found: {session_id}")
         meta = SessionMeta.from_dict(_read_json(path / "meta.json"))
-        return Session(path=path, cwd=Path(cwd).expanduser().resolve(), meta=meta)
+        return SessionManager(
+            path=path,
+            cwd=Path(cwd).expanduser().resolve(),
+            meta=meta,
+            repository=SessionRepository(path),
+        )
 
-    def open_recent(self, cwd: Path) -> Session | None:
+    def open_recent(self, cwd: Path) -> SessionManager | None:
         sessions = self.list(cwd)
         if not sessions:
             return None
@@ -102,53 +115,11 @@ class SessionStore:
             )
         _write_json(project_path, project.to_dict())
 
-        long_term_path = project_dir / "long_term.json"
+        long_term_path = project_dir / DEFAULT_LONG_TERM_NAME
         if not long_term_path.exists():
-            _write_json(long_term_path, [])
+            long_term_path.write_text("", encoding="utf-8")
 
         return project_dir
-
-
-class Session:
-    def __init__(self, *, path: Path, cwd: Path, meta: SessionMeta):
-        self.path = Path(path)
-        self.cwd = Path(cwd)
-        self.meta = meta
-
-    def append_message(self, message: Message) -> None:
-        now = _now_iso()
-        _append_jsonl(self.path / "messages.jsonl", message_to_entry(message, now))
-        self.meta.message_count += 1
-        self.meta.updated_at = now
-        _write_json(self.path / "meta.json", self.meta.to_dict())
-
-    def append_tool_result(self, tool_call_id: str, content: str) -> None:
-        self.append_message(Message(role="tool", content=content, tool_call_id=tool_call_id))
-
-    def messages(self) -> list[Message]:
-        path = self.path / "messages.jsonl"
-        if not path.exists():
-            return []
-
-        messages: list[Message] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            entry = json.loads(line)
-            message = entry_to_message(entry)
-            if message is not None:
-                messages.append(message)
-        return messages
-
-    def close(self) -> None:
-        return None
-
-    def __enter__(self) -> Session:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        self.close()
-        return False
 
 
 def _now_iso() -> str:
@@ -165,10 +136,3 @@ def _write_json(path: Path, data) -> None:
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-
-
-def _append_jsonl(path: Path, entry: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fp:
-        fp.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
-        fp.flush()

@@ -1,14 +1,20 @@
 """统一的终端输出层。
 
-所有 Agent / 编排器的用户可见输出都走这里，方便：
+所有用户可见输出都走这里，方便：
 - 统一样式
 - 未来切换到事件总线 / TUI 库（rich 等）
 - 避免业务模块反向依赖 cli_app
 """
-from pathlib import Path
+from enum import Enum
 from typing import TextIO
 
 COMMAND_OUTPUT_PREVIEW_CHARS = 4000
+
+
+class BranchNavigationChoice(str, Enum):
+    DIRECT = "direct"
+    SUMMARIZE = "summarize"
+    CANCEL = "cancel"
 
 
 def _write(message: str, out: TextIO | None = None, *, end: str = "\n", flush: bool = False) -> None:
@@ -47,13 +53,23 @@ def print_command_result(
     _write(f"📤 [{agent_name}] {tool_name} 结果:\n{text}", out)
 
 
-def print_final_result(title: str, result: str, plan_log_path: str | Path | None = None) -> None:
-    print("\n" + "-" * 50)
-    print(title)
-    print(result)
-    if plan_log_path is not None:
-        print(f"计划日志: {plan_log_path}")
-    print("-" * 50)
+def render_agent_event(event, *, agent_name: str = "react", out: TextIO | None = None) -> None:
+    if event.type == "content":
+        print_content_delta(event.data, out)
+        return
+    if event.type == "tool_call_start":
+        print_tool_start(event.data["name"], out)
+        return
+    if event.type == "tool_result":
+        print_command_result(agent_name, event.data["name"], event.data["result"], out)
+        return
+    if event.type == "error":
+        _write(f"\n[ERROR] {event.data}", out)
+        return
+    if event.type == "done":
+        reason = event.data.get("reason") if event.data else None
+        if reason == "cancelled":
+            print_cancelled()
 
 
 def print_cancel_requested() -> None:
@@ -62,60 +78,6 @@ def print_cancel_requested() -> None:
 
 def print_cancelled() -> None:
     print("\n\n⚠️ 已取消", flush=True)
-
-
-def print_plan_start() -> None:
-    print("📋 第一阶段：规划")
-    print("🧑‍💼 规划者正在分析任务...\n")
-
-
-def print_plan_steps(summary: str, *, title: str = "📋 执行计划") -> None:
-    print(title)
-    print(summary + "\n")
-
-
-def print_replan() -> None:
-    print("📝 已收到补充要求，正在重新规划...\n")
-
-
-def print_execution_phase() -> None:
-    print("⚡ 第二阶段：执行")
-
-
-def print_parallel_batch(batch_index: int, step_count: int, worker_count: int) -> None:
-    print(
-        f"⚡ 批次 #{batch_index}：{step_count} 个独立步骤并行执行"
-        f"（最多 {worker_count} 个并发 Worker）\n"
-    )
-
-
-def print_step_start(
-    worker_name: str,
-    step_id: str,
-    description: str,
-    out: TextIO | None = None,
-) -> None:
-    _write(f"🛠️ {worker_name} 执行步骤 [{step_id}]: {description}", out)
-
-
-def print_step_done(step_id: str, out: TextIO | None = None) -> None:
-    _write(f"✅ 步骤 [{step_id}] 执行完成", out)
-
-
-def print_step_cancelled(step_id: str, out: TextIO | None = None) -> None:
-    _write(f"❌ 步骤 [{step_id}] 被取消", out)
-
-
-def print_step_failed(step_id: str, reason: str, out: TextIO | None = None) -> None:
-    _write(f"❌ 步骤 [{step_id}] 执行失败：{reason}", out)
-
-
-def print_step_skipped(step_id: str, description: str) -> None:
-    print(f"⏭️ 步骤 [{step_id}] 因前置步骤失败被跳过: {description}")
-
-
-def print_buffer(content: str) -> None:
-    print(content, end="")
 
 
 def print_approval_request(level: str, tool_name: str, risk: str, arguments: dict) -> None:
@@ -130,3 +92,21 @@ def ask_approval_choice() -> str:
 
 def ask_approval_advice() -> str:
     return input("补充说明: ").strip()
+
+
+def ask_branch_navigation_choice(plan=None, out: TextIO | None = None) -> BranchNavigationChoice:
+    _ = plan
+    _write("跳转到旧消息？", out)
+    _write("  1. 直接跳转，不总结当前分支", out)
+    _write("  2. 总结当前分支后跳转", out)
+    _write("  3. 取消", out)
+
+    while True:
+        choice = input("选择 [1/2/3]: ").strip()
+        if choice == "1":
+            return BranchNavigationChoice.DIRECT
+        if choice == "2":
+            return BranchNavigationChoice.SUMMARIZE
+        if choice == "3":
+            return BranchNavigationChoice.CANCEL
+        _write("请输入 1、2 或 3。", out)

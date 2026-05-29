@@ -30,7 +30,7 @@ D:\paicli-main\paicli-main\           ← Java 源码
 |---|---|---|---|
 | 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `planning/` `tooling/` `llm/` | 骨架完成,有测试 |
 | 2(细化) | `plan/` | `planning/` (`plan.py` `task.py` `planner.py`) | 已作为唯一 Plan/DAG 实现 |
-| 3 | `memory/` | `memory_pythonic/` (短期/长期/压缩/budget/tokenizer 等) | 骨架完成 |
+| 3 | `memory/` | `sessions/long_term.py` (`long_term.md` 文本事实清单) | 已瘦身为项目级 markdown 记忆 |
 | 4 | `rag/` | — | 已放弃；本地项目检索改用 read/grep/find/ls |
 | 5 | `agent/` 子代理部分 | `multi_agent/` (orchestrator/sub_agent/roles/messages/budget) | 骨架完成 |
 | 6+ | tui / mcp / lsp / snapshot / hitl / runtime / skill | 未开始 | — |
@@ -56,7 +56,7 @@ LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `
 ## 已知问题(当前快照)
 
 - LLM 客户端已拆到 `llm/client.py`，消息/响应模型放在 `llm/types.py`。
-- `memory_pythonic/tokenizer.py` 依赖 `jieba`,未安装时会 `possibly unbound`。可选装:`pip install jieba`,或在使用处加软降级。
+- 短期 memory / JSON 长期记忆 / tokenizer 已退出主路径；会话事实在 session 树里，长期事实在 `long_term.md`。
 - 根目录旧入口/兼容文件已删除；Plan / Task / Planner 统一放在 `planning/`。
 
 ## LSP / 类型检查

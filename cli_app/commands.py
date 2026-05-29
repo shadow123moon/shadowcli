@@ -1,6 +1,9 @@
-from memory_pythonic import MemoryManager
+from sessions import BranchSummaryEntry, CompactionEntry, MessageEntry, SessionManager, TextLongTermMemory
 
-from .constants import MEMORY_COMMAND, PLAN_COMMAND, REMEMBER_COMMAND
+from .constants import JUMP_COMMAND, MEMORY_COMMAND, PLAN_COMMAND, REMEMBER_COMMAND, TREE_COMMAND
+
+
+TREE_PREVIEW_CHARS = 80
 
 
 def parse_plan_command(user_input: str) -> str | None:
@@ -21,7 +24,20 @@ def parse_remember_command(user_input: str) -> str | None:
     return None
 
 
-def handle_remember(memory: MemoryManager, user_input: str) -> str:
+def parse_tree_command(user_input: str) -> bool:
+    return user_input.strip() == TREE_COMMAND
+
+
+def parse_jump_command(user_input: str) -> str | None:
+    stripped = user_input.strip()
+    if stripped == JUMP_COMMAND:
+        return ""
+    if stripped.startswith(f"{JUMP_COMMAND} "):
+        return stripped[len(JUMP_COMMAND):].strip()
+    return None
+
+
+def handle_remember(memory: TextLongTermMemory, user_input: str) -> str:
     fact = parse_remember_command(user_input)
     if fact is None:
         return f"用法: {REMEMBER_COMMAND} <事实>"
@@ -31,8 +47,55 @@ def handle_remember(memory: MemoryManager, user_input: str) -> str:
     return f"已记住: {fact}"
 
 
-def format_memory_status(memory: MemoryManager) -> str:
+def format_memory_status(memory: TextLongTermMemory) -> str:
     return "\n".join([
-        f"long_term : {len(memory.long_term)} entries, {memory.long_term.total_tokens} tokens",
-        f"storage   : {memory.long_term.storage_path}",
+        f"long_term : {len(memory)} facts",
+        f"storage   : {memory.storage_path}",
     ])
+
+
+def format_session_tree(session: SessionManager, *, limit: int = 20) -> str:
+    entries = session.all_entries()
+    if not entries:
+        return "会话树为空。"
+
+    branch_ids = {entry.id for entry in session.get_branch()}
+    leaf_id = session.get_leaf_id()
+    shown = entries[-limit:]
+    lines = [f"会话树（最近 {len(shown)} / {len(entries)} 条）:"]
+    for entry in shown:
+        in_branch = "*" if entry.id in branch_ids else " "
+        current = " <- current" if entry.id == leaf_id else ""
+        lines.append(
+            f"{in_branch} {entry.id} {entry_label(entry):<14} {entry_preview(entry)}{current}"
+        )
+    return "\n".join(lines)
+
+
+def entry_label(entry) -> str:
+    if isinstance(entry, MessageEntry):
+        return entry.message.role
+    if isinstance(entry, BranchSummaryEntry):
+        return "branch_summary"
+    if isinstance(entry, CompactionEntry):
+        return "compaction"
+    return getattr(entry, "type", "entry")
+
+
+def entry_preview(entry) -> str:
+    if isinstance(entry, MessageEntry):
+        text = entry.message.content or ""
+        if entry.message.tool_calls:
+            names = ", ".join(call.function.name for call in entry.message.tool_calls)
+            text = text or f"tool_calls: {names}"
+    elif isinstance(entry, BranchSummaryEntry):
+        text = entry.summary
+    elif isinstance(entry, CompactionEntry):
+        text = entry.summary
+    else:
+        text = ""
+
+    compact = " ".join(text.split())
+    if len(compact) <= TREE_PREVIEW_CHARS:
+        return compact
+    return compact[:TREE_PREVIEW_CHARS] + "..."

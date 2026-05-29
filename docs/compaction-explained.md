@@ -246,19 +246,19 @@ msg 53 原文
 
 ## 八、回到你的项目
 
-你现在的 `compress.py` 干的事：
+旧版 `memory_pythonic/compress.py` 干过的事：
 
 ```
-取出 ConversationMemory.pending_compress 里的老消息
+取出旧短期记忆待压缩列表里的老消息
    ↓
 LLM 摘要
    ↓
-short_term.inject_summary(summary_entry)   <- 替换老消息
+把摘要回注到旧短期记忆               <- 替换老消息
    ↓
 老消息从此消失
 ```
 
-未来要改成 pi 风格的话，关键变化是：
+当前主线已经删掉短期 memory/压缩链路，压缩应直接落到追加式 `CompactionEntry`，不要再做 `summary.md` sidecar。关键变化是：
 
 ```
 session 里找一个合法切点，记下 first_kept_entry_id

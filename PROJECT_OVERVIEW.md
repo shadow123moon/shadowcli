@@ -16,7 +16,9 @@ python -m cli_app
 普通输入            默认走 ReactAgent
 /plan <任务>        走 ReactAgent 单 Agent 计划执行
 /remember <事实>    写入长期记忆
-/memory             查看短期/长期记忆状态
+/memory             查看长期记忆状态
+/tree               查看最近会话节点
+/jump <entry_id>    跳转到旧消息
 /tools              查看已注册工具
 /quit               退出
 ```
@@ -30,7 +32,7 @@ python -m cli_app
 ```text
 cli_app
   -> ReactAgent
-  -> SubAgent(role=REACT)
+  -> AgentLoop
   -> ToolRuntime.execute(name, args)
   -> ToolRegistry.execute(name, args)
   -> Tool.execute(args)
@@ -46,30 +48,30 @@ cli_app /plan
   -> ToolRegistry.execute(name, args)
 ```
 
-关键约束：Agent 不直接 `tool.execute(...)`，统一走 `registry.execute(...)`。日志、HITL 审批和工具扩展都在这个入口收口。
+关键约束：Agent 不直接 `tool.execute(...)`，统一走 `registry.execute(...)`。Agent 只产生事件，`cli_app/runner.py` 把事件路由给 `ui/terminal.py` 渲染，并把消息事实写入 session。
 
 ## 模块职责
 
 | 模块 | 职责 |
 |---|---|
-| `cli_app/` | 交互入口、命令路由、日志初始化 |
-| `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt |
-| `sessions/` | 按项目目录隔离的会话存储，保存完整 messages.jsonl 转录 |
-| `multi_agent/` | 实验/历史 Plan-and-Execute 代码，当前 CLI 主路径禁用 |
+| `cli_app/` | 交互入口、命令路由、日志初始化、Agent 事件路由 |
+| `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
+| `ui/` | 用户可见终端输出和输入 |
+| `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
 | `planning/` | 旧版 Plan/DAG 数据结构和规划器 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
 | `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
 | `extensions/approval_policy.py` | 工具风险判断 |
-| `memory_pythonic/` | 短期记忆、长期记忆、上下文构造、压缩 |
 | `llm/` | OpenAI 兼容 Chat API 客户端和消息模型 |
 
 ## 记忆
 
-Session 和 Memory 分层：
+Session 和长期记忆分层：
 
 ```text
-Session = 完整会话转录，可恢复上下文，按项目目录隔离
-Memory  = 提炼后的长期事实/短期摘要
+Session        = 完整会话树，可恢复当前 branch，按项目目录隔离
+TextLongTermMemory = 用户通过 /remember 主动保存的 markdown bullet 事实清单
+RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和 long_term 现算
 ```
 
 会话存储默认目录：
@@ -77,22 +79,30 @@ Memory  = 提炼后的长期事实/短期摘要
 ```text
 ~/.pai_cli/sessions/<project_key>/
   project.json
-  long_term.json
+  long_term.md
   conversations/<session_id>/
     meta.json
     messages.jsonl
-    summary.md
 ```
 
 当前有三层概念：
 
 ```text
-history     = 本轮 LLM 调用的消息序列，不负责长期存储
-short_term  = 当前会话近期对话，保存在 MemoryManager 内存中
-long_term   = 跨会话可靠事实，默认写入 agent_memory/long_term_memory.json
+messages.jsonl = session_header / message / leaf / branch_summary / compaction 事件流
+long_term.md   = 项目级长期事实，/remember 追加 "- 事实"
 ```
 
-普通输入和 `/plan` 都通过 `ReactAgent` 读取记忆上下文；`/plan` 只是单 Agent 的计划执行提示。
+Session 只追加，不改旧 entry。`leaf` 表示当前分支位置；`branch_summary` 是树上的节点，不是 sidecar 文件。System prompt 和 RuntimeContextBuilder 生成的 system context 都是运行时构造的临时视图，不作为普通消息写入 `messages.jsonl`。普通输入和 `/plan` 都通过同一个 `ReactAgent` 执行，`/plan` 只是单 Agent 的计划执行提示。
+
+分支跳转入口保持三层边界：
+
+```text
+ui.ask_branch_navigation_choice()  -> 只询问用户 1/2/3
+cli_app.navigate_session_branch()  -> 调 plan_navigation，再按选择路由
+SessionManager                     -> branch_to 或 branch_to_with_summary
+```
+
+`/tree` 显示最近 20 个节点和当前 leaf；`/jump <entry_id>` 使用上面的跳转入口。选择“总结当前分支后跳转”时，由 `sessions.summarizer.generate_branch_summary()` 生成摘要，再追加 `branch_summary` 节点。
 
 长期记忆当前主要来源：
 
@@ -100,7 +110,7 @@ long_term   = 跨会话可靠事实，默认写入 agent_memory/long_term_memory
 /remember <事实>
 ```
 
-普通对话会进入短期记忆，长期记忆不自动从模型回答里抽取事实。这样能避免把不确定回答、临时日志和推理过程污染成长记忆。
+普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。
 
 ## HITL
 
@@ -156,17 +166,25 @@ find   查找文件
 
 ## 日志
 
-普通终端日志默认是 INFO，细节日志走全局日志配置。
+用户可见内容、开发日志和会话事实分开处理：
+
+```text
+用户可见内容 -> ui/terminal.py
+开发调试信息 -> logging / PAICLI_DEBUG_LOG
+会话事实     -> sessions/.../messages.jsonl
+```
+
+普通终端日志默认是 WARNING，细节日志按需写 debug 文件。
 
 环境变量：
 
 ```text
-PAICLI_LOG_LEVEL=INFO
+PAICLI_LOG_LEVEL=WARNING
+PAICLI_DEBUG_LOG=1
 PAICLI_COMMAND_TIMEOUT_SECONDS=120
 ```
 
-`/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局日志。
-旧计划日志模块暂时保留，供后续调试或迁移参考。
+`/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局 debug 日志。
 
 工具日志应回答“做了什么”：
 
@@ -208,13 +226,12 @@ conda run -n lc python -m unittest discover -s tests -v
 | `/plan` 单 Agent | 已接入 |
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
 | HITL | 已接入，合并到 `ToolRegistry` |
-| 短期/长期记忆 | 已接入，长期记忆由 `/remember` 写入 |
+| Session/长期记忆 | 已接入，session 实时记录会话树，长期记忆写入 `long_term.md` |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
-| Plan 日志 | CLI 主路径已停用旧 `logs/plans/` 计划日志 |
-| 测试 | `unittest discover -s tests -v` 覆盖主要链路 |
+| Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
+| 测试 | 主线 import / HITL / session 树测试可单独验证 |
 
 ## 待清理
 
 - `agent/execute.py` 看起来像旧执行器残留，后续可以确认是否删除。
 - `tooling/file_tools.py` 后续如果继续膨胀，可以再拆成 file/edit/search 三类。
-- `memory_pythonic/retrieval.py` 和 `memory_pythonic/tokenizer.py` 是否继续保留，取决于后续是否要做更强的记忆检索。

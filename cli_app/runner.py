@@ -2,23 +2,33 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from collections.abc import Callable
 
 from dotenv import load_dotenv
 
 from agent import ReactAgent
 from mcp_integration import load_mcp_config, McpServerManager, McpToolWrapper
-from sessions import ContextBuilder, Session, SessionStore
-
+from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
+from sessions.summarizer import generate_branch_summary
 from .commands import (
+    format_session_tree,
     format_memory_status,
     handle_remember,
+    parse_jump_command,
     parse_plan_command,
     parse_remember_command,
+    parse_tree_command,
 )
 from .constants import BANNER, HELP, MEMORY_COMMAND
-from .factories import build_agent, build_memory, build_registry, list_tools
+from .factories import build_agent, build_long_term_memory, build_registry, list_tools
 from .logging_config import configure_logging
-from ui import print_message
+from ui import (
+    BranchNavigationChoice,
+    ask_branch_navigation_choice,
+    print_cancel_requested,
+    print_message,
+    render_agent_event,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,30 +38,23 @@ def run_once(
     user_input: str,
     *,
     plan_log_dir: Path | None = None,
-    session: Session | None = None,
-    context_builder: ContextBuilder | None = None,
+    runtime_context_builder: RuntimeContextBuilder | None = None,
 ) -> None:
     _ = plan_log_dir
     try:
-        start_index = len(getattr(agent, "session_messages", []))
         plan_input = parse_plan_command(user_input)
         if plan_input is not None:
             if not plan_input:
                 print_message("用法: /plan <任务>")
                 return
-            log.info("[入口] 识别为单 Agent 计划模式，任务长度 %d 字", len(plan_input))
-            context = context_builder.build(plan_input) if context_builder is not None else ""
-            result = agent.run(_single_agent_plan_prompt(plan_input), context=context)
-            log.info("[入口] 单 Agent 计划模式完成，输出长度 %d 字", len(result or ""))
+            context = runtime_context_builder.build(plan_input) if runtime_context_builder is not None else ""
+            _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context)
         else:
-            log.info("[入口] 识别为普通对话，进入 React 模式，输入长度 %d 字", len(user_input))
-            context = context_builder.build(user_input) if context_builder is not None else ""
-            result = agent.run(user_input, context=context)
+            context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
+            _run_agent_events(agent, user_input, context=context)
             # React 模式：已经流式打印，不再重复输出
-            log.info("[入口] React 模式完成，输出长度 %d 字", len(result or ""))
-        _append_new_session_messages(session, getattr(agent, "session_messages", []), start_index)
     except Exception as e:
-        log.debug("[入口] 执行失败详情", exc_info=True)
+        log.exception("[入口] 执行失败")
         print_message(f"\n[ERROR] 执行失败: {e}")
         return
 
@@ -65,6 +68,50 @@ def _single_agent_plan_prompt(task: str) -> str:
     ])
 
 
+def _run_agent_events(agent: ReactAgent, user_input: str, *, context: str = "") -> str:
+    content_parts: list[str] = []
+    try:
+        for event in agent.events(user_input, context=context):
+            if event.type == "content":
+                content_parts.append(event.data)
+            render_agent_event(event, agent_name="react")
+            if event.type == "done":
+                break
+    except KeyboardInterrupt:
+        print_cancel_requested()
+        agent.cancel()
+        return "".join(content_parts) + "\n[已中止]"
+    return "".join(content_parts)
+
+
+def navigate_session_branch(
+    session: SessionManager,
+    target_id: str | None,
+    *,
+    choose_navigation: Callable[[NavigationPlan], BranchNavigationChoice | str] = ask_branch_navigation_choice,
+    build_branch_summary: Callable[[NavigationPlan], str] | None = None,
+) -> BranchNavigationChoice:
+    plan = session.plan_navigation(target_id)
+    choice = BranchNavigationChoice(choose_navigation(plan))
+
+    if choice == BranchNavigationChoice.CANCEL:
+        return choice
+    if choice == BranchNavigationChoice.DIRECT:
+        session.branch_to(target_id)
+        return choice
+
+    if build_branch_summary is None:
+        raise ValueError("build_branch_summary is required when branch navigation chooses summary")
+    summary = build_branch_summary(plan)
+    session.branch_to_with_summary(target_id, summary=summary)
+    return choice
+
+
+def reload_agent_conversation(agent: ReactAgent, session: SessionManager) -> None:
+    if hasattr(agent, "replace_conversation_messages"):
+        agent.replace_conversation_messages(session.messages())
+
+
 def repl() -> int:
     load_dotenv()
     configure_logging()
@@ -72,7 +119,7 @@ def repl() -> int:
     cwd = Path.cwd()
     session_store = SessionStore()
     session = session_store.open_recent(cwd) or session_store.create(cwd)
-    memory = build_memory(session_store.project_dir(cwd) / "long_term.json")
+    long_term = build_long_term_memory(session_store.project_dir(cwd) / "long_term.md")
 
     # MCP 集成
     mcp_manager = McpServerManager()
@@ -82,7 +129,7 @@ def repl() -> int:
     mcp_failed = 0
     for name, config in mcp_configs.items():
         if config.disabled:
-            log.info(f"MCP server '{name}' is disabled, skipping")
+            log.debug("MCP server '%s' is disabled, skipping", name)
             continue
 
         try:
@@ -91,18 +138,22 @@ def repl() -> int:
                 wrapper = McpToolWrapper(name, tool_def, mcp_manager)
                 runtime.registry.register(wrapper)
             mcp_loaded += 1
-            log.info(f"✓ MCP server '{name}' loaded ({len(tools)} tools)")
+            log.debug("MCP server '%s' loaded (%d tools)", name, len(tools))
         except Exception as e:
             mcp_failed += 1
-            log.error(f"✗ MCP server '{name}' failed: {e}")
+            log.exception("MCP server '%s' failed", name)
 
     if mcp_loaded > 0:
         print_message(f"✓ 已加载 {mcp_loaded} 个 MCP server")
     if mcp_failed > 0:
         print_message(f"✗ {mcp_failed} 个 MCP server 启动失败")
 
-    agent = build_agent(runtime, memory, session_messages=session.messages())
-    context_builder = ContextBuilder(session=session, long_term=memory.long_term)
+    agent = build_agent(
+        runtime,
+        conversation_messages=session.messages(),
+        on_message_appended=session.append_message,
+    )
+    runtime_context_builder = RuntimeContextBuilder(session=session, long_term=long_term)
 
     print_message(BANNER)
 
@@ -126,35 +177,47 @@ def repl() -> int:
                 print_message(list_tools(runtime))
                 continue
             if line == MEMORY_COMMAND:
-                print_message(format_memory_status(memory))
+                print_message(format_memory_status(long_term))
+                continue
+            if parse_tree_command(line):
+                print_message(format_session_tree(session))
+                continue
+            jump_target = parse_jump_command(line)
+            if jump_target is not None:
+                if not jump_target:
+                    print_message("用法: /jump <entry_id>")
+                    continue
+                try:
+                    choice = navigate_session_branch(
+                        session,
+                        jump_target,
+                        choose_navigation=ask_branch_navigation_choice,
+                        build_branch_summary=generate_branch_summary,
+                    )
+                except KeyError:
+                    print_message(f"未找到会话节点: {jump_target}")
+                    continue
+                if choice != BranchNavigationChoice.CANCEL:
+                    reload_agent_conversation(agent, session)
+                    runtime_context_builder = RuntimeContextBuilder(session=session, long_term=long_term)
+                    print_message(f"已跳转到: {session.get_leaf_id()}")
+                else:
+                    print_message("已取消跳转。")
                 continue
             if parse_remember_command(line) is not None:
-                print_message(handle_remember(memory, line))
+                print_message(handle_remember(long_term, line))
                 continue
             if parse_plan_command(line) is not None:
-                run_once(agent, line, session=session, context_builder=context_builder)
+                run_once(agent, line, runtime_context_builder=runtime_context_builder)
                 continue
             if line.startswith("/"):
                 print_message(f"未知命令: {line}  (输入 /help 查看)")
                 continue
 
-            run_once(agent, line, session=session, context_builder=context_builder)
+            run_once(agent, line, runtime_context_builder=runtime_context_builder)
     finally:
         # 清理 MCP 资源
-        log.info("Shutting down MCP servers...")
+        log.debug("Shutting down MCP servers...")
         mcp_manager.shutdown()
 
     return 0
-
-
-def _append_new_session_messages(
-    session: Session | None,
-    messages,
-    start_index: int,
-) -> None:
-    if session is None:
-        return
-    for message in messages[start_index:]:
-        if message.role == "system":
-            continue
-        session.append_message(message)
