@@ -16,7 +16,8 @@ from tooling import (
     ToolRegistry,
     WriteTool,
     WebSearchTool,
-    WebFetchTool
+    WebFetchTool,
+    register_freshness_guard,
 )
 
 from .constants import DEFAULT_LONG_TERM_PATH
@@ -40,6 +41,8 @@ def build_registry() -> ToolRuntime:
     registry.register(WebFetchTool())
     runtime = ToolRuntime(registry)
 
+    # 编辑前必须先 read、且文件未被外部改动（核心防护，默认开启）
+    register_freshness_guard(runtime)
 
     approval_mode = os.getenv("PAICLI_APPROVAL", "off").lower()
     if os.getenv("PAICLI_HITL") == "1":

@@ -18,11 +18,13 @@ from .terminal import (
     print_tool_start,
     render_agent_event,
 )
+from .textual_renderer import TextualRenderer
 
 __all__ = [
     "BranchNavigationChoice",
     "Renderer",
     "TerminalRenderer",
+    "TextualRenderer",
     "ask_approval_advice",
     "ask_approval_choice",
     "ask_branch_navigation_choice",

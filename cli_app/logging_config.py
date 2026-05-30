@@ -4,7 +4,15 @@ from pathlib import Path
 
 
 _CONSOLE_HANDLER_ATTR = "_shadowcli_console_handler"
+_CONSOLE_NOISY_FILTER_ATTR = "_shadowcli_console_noisy_filter"
 _DEBUG_HANDLER_ATTR = "_shadowcli_debug_handler"
+_NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "openai",
+    "requests",
+    "urllib3",
+)
 DEFAULT_DEBUG_LOG_PATH = Path("logs/debug/debug.log")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
@@ -21,6 +29,9 @@ def configure_logging(debug_log_path: str | Path | None = None) -> None:
         console_handler = logging.StreamHandler()
         setattr(console_handler, _CONSOLE_HANDLER_ATTR, True)
         root_logger.addHandler(console_handler)
+
+    _install_console_noise_filter(console_handler)
+    _suppress_http_client_noise()
 
     for handler in root_logger.handlers:
         if isinstance(handler, logging.FileHandler) or getattr(handler, _DEBUG_HANDLER_ATTR, False):
@@ -52,6 +63,18 @@ def _resolve_debug_log_path(debug_log_path: str | Path | None) -> Path | None:
     return Path(env_value)
 
 
+def _install_console_noise_filter(console_handler: logging.Handler) -> None:
+    if getattr(console_handler, _CONSOLE_NOISY_FILTER_ATTR, False):
+        return
+    console_handler.addFilter(_SuppressHttpNoiseFilter())
+    setattr(console_handler, _CONSOLE_NOISY_FILTER_ATTR, True)
+
+
+def _suppress_http_client_noise() -> None:
+    for logger_name in _NOISY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 def _install_debug_file_handler(root_logger: logging.Logger, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -65,3 +88,23 @@ def _install_debug_file_handler(root_logger: logging.Logger, path: Path) -> None
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
     root_logger.addHandler(handler)
+
+
+class _SuppressHttpNoiseFilter(logging.Filter):
+    _NOISY_PREFIXES = (
+        "httpx",
+        "httpcore",
+        "openai",
+        "requests",
+        "urllib3",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+
+        message = record.getMessage()
+        if message.startswith("HTTP Request:") or message.startswith("HTTP Response:"):
+            return False
+
+        return not record.name.startswith(self._NOISY_PREFIXES)

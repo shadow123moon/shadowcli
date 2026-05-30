@@ -1,6 +1,15 @@
 from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager, TextLongTermMemory
 
-from .constants import COMPACT_COMMAND, JUMP_COMMAND, MEMORY_COMMAND, PLAN_COMMAND, REMEMBER_COMMAND, TREE_COMMAND
+from .constants import (
+    COMPACT_COMMAND,
+    JUMP_COMMAND,
+    MEMORY_COMMAND,
+    NEW_COMMAND,
+    PLAN_COMMAND,
+    REMEMBER_COMMAND,
+    RESUME_COMMAND,
+    TREE_COMMAND,
+)
 
 
 TREE_PREVIEW_CHARS = 80
@@ -22,6 +31,19 @@ def parse_remember_command(user_input: str) -> str | None:
     if stripped.startswith(f"{REMEMBER_COMMAND} "):
         return stripped[len(REMEMBER_COMMAND):].strip()
     return None
+
+
+def parse_resume_command(user_input: str) -> str | None:
+    stripped = user_input.strip()
+    if stripped == RESUME_COMMAND:
+        return ""
+    if stripped.startswith(f"{RESUME_COMMAND} "):
+        return stripped[len(RESUME_COMMAND):].strip()
+    return None
+
+
+def parse_new_command(user_input: str) -> bool:
+    return user_input.strip() == NEW_COMMAND
 
 
 def parse_tree_command(user_input: str) -> bool:

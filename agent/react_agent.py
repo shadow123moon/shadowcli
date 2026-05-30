@@ -5,7 +5,7 @@ from llm.types import Message
 from tooling import ToolRegistry
 
 from .agent_loop import AgentLoop
-from .prompts import react_agent_prompt
+from .prompts import filter_tool_definitions_for_model, react_agent_prompt
 
 TOOL_INTENT_KEYWORDS = (
     "读取", "读", "查看文件", "打开文件", "写入", "创建", "新建", "修改", "编辑",
@@ -77,7 +77,7 @@ def _should_enable_tools(user_input: str) -> bool:
 
 
 def _build_react_system_prompt(tool_registry: ToolRegistry) -> str:
-    defs = tool_registry.get_all_definitions()
+    defs = filter_tool_definitions_for_model(tool_registry.get_all_definitions())
     tools_desc = "\n".join(
         f"- {d['function']['name']}: {d['function']['description']}" for d in defs
     )

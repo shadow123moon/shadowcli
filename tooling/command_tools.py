@@ -18,14 +18,20 @@ class BashTool(Tool):
 
     @property
     def description(self):
-        return "执行 Shell 命令"
+        return "执行本机命令；Windows 下实际由 PowerShell 执行。直接写 PowerShell 命令，不要再嵌套 powershell -Command"
 
     @property
     def parameters(self):
         return {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "要执行的命令"},
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "要执行的命令。Windows 下使用 PowerShell 语法；不要再嵌套 powershell -Command；"
+                        "不要使用 bash 专属的 find/xargs/tail/&&。"
+                    ),
+                },
                 "timeout_seconds": {
                     "type": "integer",
                     "description": "命令最长执行秒数，默认 120 秒",

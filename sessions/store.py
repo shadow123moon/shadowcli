@@ -5,10 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .ids import new_session_id, project_key_for
+from .entries import MessageEntry
 from .long_term import DEFAULT_LONG_TERM_NAME
 from .manager import SessionManager
 from .repository import SessionRepository
-from .types import ProjectMeta, SESSION_VERSION, SessionMeta
+from .types import DEFAULT_SESSION_TITLE, ProjectMeta, SESSION_VERSION, SessionMeta, title_from_text
 
 
 DEFAULT_SESSION_ROOT = Path.home() / ".pai_cli" / "sessions"
@@ -66,7 +67,7 @@ class SessionStore:
         path = project_dir / "conversations" / session_id
         if not path.exists():
             raise FileNotFoundError(f"session not found: {session_id}")
-        meta = SessionMeta.from_dict(_read_json(path / "meta.json"))
+        meta = _load_session_meta(path)
         return SessionManager(
             path=path,
             cwd=Path(cwd).expanduser().resolve(),
@@ -88,7 +89,7 @@ class SessionStore:
         metas: list[SessionMeta] = []
         for meta_path in conversations.glob("*/meta.json"):
             try:
-                metas.append(SessionMeta.from_dict(_read_json(meta_path)))
+                metas.append(_load_session_meta(meta_path.parent))
             except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 continue
         return sorted(metas, key=lambda meta: meta.updated_at, reverse=True)
@@ -136,3 +137,22 @@ def _write_json(path: Path, data) -> None:
         json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _load_session_meta(path: Path) -> SessionMeta:
+    meta_path = path / "meta.json"
+    meta = SessionMeta.from_dict(_read_json(meta_path))
+    if not meta.title:
+        meta.title = _infer_session_title(path)
+        _write_json(meta_path, meta.to_dict())
+    return meta
+
+
+def _infer_session_title(path: Path) -> str:
+    state = SessionRepository(path).load()
+    for entry in state.entries:
+        if isinstance(entry, MessageEntry) and entry.message.role == "user":
+            title = title_from_text(entry.message.content)
+            if title:
+                return title
+    return DEFAULT_SESSION_TITLE

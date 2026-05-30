@@ -4,6 +4,17 @@ from dataclasses import asdict, dataclass
 
 
 SESSION_VERSION = 1
+DEFAULT_SESSION_TITLE = "未命名对话"
+SESSION_TITLE_PREVIEW_CHARS = 36
+
+
+def title_from_text(text: str | None, *, limit: int = SESSION_TITLE_PREVIEW_CHARS) -> str | None:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return None
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "..."
 
 
 @dataclass

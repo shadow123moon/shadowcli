@@ -10,6 +10,7 @@ from extensions.tool_runtime import ToolExecutionBlocked
 from llm import FunctionCall, Message, ToolCall, chat_stream
 
 from .budget import AgentBudget, ExitReason
+from .prompts import filter_tool_definitions_for_model
 
 log = logging.getLogger(__name__)
 TOOL_ACTION_PREVIEW_CHARS = 50
@@ -84,7 +85,12 @@ class AgentLoop:
 
             tools_schema = None
             if allow_tools and self.use_tools:
-                tools_schema = self.tool_registry.get_all_definitions()
+                tools_schema = filter_tool_definitions_for_model(
+                    self.tool_registry.get_all_definitions(),
+                    task.content,
+                )
+                if not tools_schema:
+                    tools_schema = None
 
             content_parts: list[str] = []
             tool_calls_data: list[dict] = []
@@ -171,10 +177,6 @@ class AgentLoop:
 
                 try:
                     result = self._exec_one(tool_call_obj)
-                    if "工具调用被拒绝" in result:
-                        yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-                        yield StreamEvent("done", {"reason": "blocked"})
-                        return
                 except ToolExecutionBlocked as exc:
                     result = f"工具调用被拒绝: {exc}"
                     yield StreamEvent("tool_result", {"name": tc["name"], "result": result})

@@ -9,6 +9,7 @@ from .file_tools import (
     WriteTool,
 
 )
+from .file_tracker import FileTracker, get_file_tracker, register_freshness_guard
 from .registry import ToolRegistry
 from .web_tools import WebSearchTool ,WebFetchTool
 
@@ -23,5 +24,8 @@ __all__ = [
     "GrepTool",
     "FindTool",
     "WebSearchTool",
-    "WebFetchTool"
+    "WebFetchTool",
+    "FileTracker",
+    "get_file_tracker",
+    "register_freshness_guard",
 ]

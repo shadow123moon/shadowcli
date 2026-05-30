@@ -8,6 +8,7 @@ import requests
 
 from llm.types import ChatResponse, FunctionCall, Message, ToolCall
 
+
 @dataclass
 class StreamEvent:
     """流式事件。
@@ -50,6 +51,7 @@ def chat(
     body = {"model": model, "messages": [_message_to_dict(m) for m in messages]}
     if tools:
         body["tools"] = tools
+        body["parallel_tool_calls"] = False
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -82,13 +84,17 @@ def chat_stream(
         raise ValueError("MODEL 未配置，请设置环境变量或传入参数")
 
     client = OpenAI(api_key=api_key, base_url=api_url)
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[_message_to_dict(m) for m in messages],
-        tools=tools,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    create_kwargs = {
+        "model": model,
+        "messages": [_message_to_dict(m) for m in messages],
+        "tools": tools,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if tools:
+        create_kwargs["parallel_tool_calls"] = False
+
+    stream = client.chat.completions.create(**create_kwargs)
 
     tool_calls_buffer = {}
     usage_data = None
@@ -112,7 +118,7 @@ def chat_stream(
             if delta.content:
                 yield StreamEvent("content", delta.content)
 
-            # tool_calls 片段（累积）
+            # tool_calls 片段（累积标准 OpenAI 格式）
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -129,6 +135,7 @@ def chat_stream(
                             tool_calls_buffer[idx]["function"]["name"] = tc.function.name
                         if tc.function.arguments:
                             tool_calls_buffer[idx]["function"]["arguments"] += tc.function.arguments
+
     except KeyboardInterrupt:
         # 用户按 Ctrl+C，设置取消标志并优雅退出
         if cancel:

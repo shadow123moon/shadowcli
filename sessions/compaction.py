@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 
 from llm import ChatResponse, Message, chat
@@ -175,29 +176,76 @@ def _estimate_text_tokens(text: str) -> int:
     encoder = _token_encoder()
     if encoder is not None:
         try:
-            return max(1, len(encoder.encode(text or "")))
+            return max(1, len(encoder.encode(text or "", disallowed_special=())))
+        except TypeError:
+            try:
+                return max(1, len(encoder.encode(text or "")))
+            except Exception:
+                pass
         except Exception:
             pass
+    # Fallback: ~4 chars per token for English/Chinese mixed text
     return max(1, (len(text) + 3) // 4)
 
 
+_ENCODER_CACHE = None
+_ENCODER_FAILED = False
+_ENCODER_MODULE_ID = None
+
+
 def _token_encoder():
-    try:
-        import tiktoken
-    except Exception:
+    global _ENCODER_CACHE, _ENCODER_FAILED, _ENCODER_MODULE_ID
+
+    current_module = sys.modules.get("tiktoken")
+    current_module_id = id(current_module) if current_module is not None else None
+    if _ENCODER_CACHE is not None and _ENCODER_MODULE_ID != current_module_id:
+        _ENCODER_CACHE = None
+        _ENCODER_FAILED = False
+    if _ENCODER_FAILED and current_module is not None:
+        _ENCODER_FAILED = False
+
+    if _ENCODER_FAILED:
         return None
 
-    model = os.environ.get("MODEL") or "gpt-4o"
-    try:
-        return tiktoken.encoding_for_model(model)
-    except Exception:
-        pass
+    if _ENCODER_CACHE is not None:
+        return _ENCODER_CACHE
 
-    for encoding_name in ("o200k_base", "cl100k_base"):
+    try:
+        import tiktoken  # type: ignore
+    except Exception:
+        _ENCODER_FAILED = True
+        return None
+
+    _ENCODER_MODULE_ID = id(tiktoken)
+
+    model = os.environ.get("MODEL") or "gpt-4o"
+
+    # Try with a short timeout to avoid hanging on network issues
+    import socket
+    old_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(3.0)  # 3 second timeout for downloads
+
         try:
-            return tiktoken.get_encoding(encoding_name)
+            enc = tiktoken.encoding_for_model(model)
+            _ENCODER_CACHE = enc
+            _ENCODER_MODULE_ID = id(tiktoken)
+            return enc
         except Exception:
-            continue
+            pass
+
+        for encoding_name in ("o200k_base", "cl100k_base"):
+            try:
+                enc = tiktoken.get_encoding(encoding_name)
+                _ENCODER_CACHE = enc
+                _ENCODER_MODULE_ID = id(tiktoken)
+                return enc
+            except Exception:
+                continue
+    finally:
+        socket.setdefaulttimeout(old_timeout)
+
+    _ENCODER_FAILED = True
     return None
 
 

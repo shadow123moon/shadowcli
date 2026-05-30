@@ -16,7 +16,7 @@ from .entries import (
     empty_details,
 )
 from .repository import SessionRepository
-from .types import SessionMeta
+from .types import DEFAULT_SESSION_TITLE, SessionMeta, title_from_text
 
 
 @dataclass
@@ -55,6 +55,10 @@ class SessionManager:
         )
         self._append_entry(entry)
         self.meta.message_count += 1
+        if (not self.meta.title or self.meta.title == DEFAULT_SESSION_TITLE) and message.role == "user":
+            title = title_from_text(message.content)
+            if title:
+                self.meta.title = title
         self._persist_meta(entry.timestamp)
         return entry
 
