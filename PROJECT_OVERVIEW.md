@@ -1,6 +1,6 @@
 # pythonProject4 项目地图
 
-这份文档只记录当前 Python 项目的运行入口、模块职责和真实执行链路。`CLAUDE.md` 仍然保留为“改写策略和阶段情况”文档。
+这份文档只记录当前 Python 项目的运行入口、模块职责和真实执行链路。`CLAUDE.md` 记录项目目标、协作原则和测试落位约定。
 
 ## 入口
 
@@ -58,7 +58,6 @@ cli_app /plan
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
 | `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
-| `planning/` | 旧版 Plan/DAG 数据结构和规划器 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
 | `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
 | `extensions/approval_policy.py` | 工具风险判断 |
@@ -216,6 +215,15 @@ pip install -r requirements.txt
 conda run -n lc python -m cli_app
 conda run -n lc python -m unittest discover -s tests -v
 ```
+
+测试文件存放约定：
+
+```text
+tests/test_*.py        自动化单元/集成测试，参与 unittest discover
+debug/artifacts/       测试输出、截图、临时压缩包等产物
+```
+
+根目录只保留项目级入口、配置和总览文档；新增测试、报告、截图不要直接放根目录。
 
 ## 当前状态
 

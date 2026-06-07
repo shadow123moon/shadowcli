@@ -1,17 +1,14 @@
 # pythonProject4
 
-`D:\paicli-main\paicli-main`(Java/Maven 项目 **PaiCLI**)的 **Python 重写版**。这不是从零设计的项目——所有模块都有 Java 原版可对照。
+当前项目是一个已经独立运行的 Python Agent CLI。`D:\paicli-main\paicli-main`(Java/Maven 项目 **PaiCLI**)仍然是重要参考，但本项目不再以“逐期重写 Java 原版”为目标。
 
 ## 项目上下文
 
 **原项目 PaiCLI**:一个对标 Claude Code 的 Java Agent CLI,作者沉默王二,按"期"演进(第一期 ReAct,第二期 Plan-and-Execute + DAG,第三期 Memory,第四期 RAG,第五期 Multi-Agent...截至第 21 期已实现 LSP 诊断注入、Git 快照、异步后台任务、图片输入等)。
 
-**重写目的**:用户**逐模块学习**,工作流是:
-1. Claude(我)读 Java 原版对应模块,理解其设计
-2. Claude 用 Python 习惯重写一份,**不是逐行翻译**——要重构成 Pythonic 风格
-3. 用户阅读 Python 版本来学习这套架构
+**当前目标**:以现有 Python 项目为主线，持续维护、收敛边界、补齐测试和文档。Java 原版用于理解设计意图和借鉴思路，不作为必须对齐的实现蓝本。
 
-**对协作者(Claude)的核心要求**:重构能力。Java 的 `Builder` / 接口 / 静态工厂 / 复杂继承,在 Python 里要换成 dataclass / Protocol / `@classmethod`、组合等更地道的写法,而不是机械搬运。
+**对协作者(Claude)的核心要求**:维护判断和边界意识。优先尊重当前 Python 模块结构；需要借鉴 Java 设计时，先理解意图，再用 Python 习惯落到现有代码里，避免机械搬运和推倒重来。
 
 ## 原项目位置
 
@@ -24,15 +21,13 @@ D:\paicli-main\paicli-main\           ← Java 源码
 ├── AGENTS.md  README.md  ROADMAP.md  ← 权威设计文档,看模块设计时优先读
 ```
 
-## Python 重写状态(2026-05-23)
+## Python 项目状态(2026-05-30)
 
-| 期 | Java 包 | Python 模块 | 状态 |
+| 参考期 | Java 包 | Python 模块 | 状态 |
 |---|---|---|---|
-| 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `planning/` `tooling/` `llm/` | 骨架完成,有测试 |
-| 2(细化) | `plan/` | `planning/` (`plan.py` `task.py` `planner.py`) | 已作为唯一 Plan/DAG 实现 |
+| 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `tooling/` `llm/` | 主路径已接入,持续维护 |
 | 3 | `memory/` | `sessions/long_term.py` (`long_term.md` 文本事实清单) | 已瘦身为项目级 markdown 记忆 |
 | 4 | `rag/` | — | 已放弃；本地项目检索改用 read/grep/find/ls |
-| 5 | `agent/` 子代理部分 | `multi_agent/` (orchestrator/sub_agent/roles/messages/budget) | 骨架完成 |
 | 6+ | tui / mcp / lsp / snapshot / hitl / runtime / skill | 未开始 | — |
 
 ## 运行 / 测试
@@ -44,10 +39,16 @@ python -m unittest discover -s tests -v # 当前测试入口
 
 LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `MODEL`)或 `.env`。
 
-## 重构原则(重要)
+## 测试文件位置
+
+- `tests/test_*.py`: 自动化单元/集成测试，必须能被 `python -m unittest discover -s tests` 稳定发现和运行。
+- `debug/artifacts/`: 测试输出、截图、临时压缩包等产物。
+- 根目录不放散落测试文件；新增测试按上面三类归位。
+
+## 演进原则(重要)
 
 写 Python 模块时:
-- **不要逐行翻译 Java**——先看懂 Java 那一期的"意图",再用 Python 重新组织
+- **不要为了对齐 Java 推倒现有 Python 实现**——先看懂需求和现有边界，再小步整理
 - 优先 `dataclass` / `Enum` / `Protocol`,不要造 Java 风格的接口 + 实现类
 - 异常处理:Python 让它抛出,不要 Java 风格层层 `try/catch` 包一层 RuntimeException
 - 并发:`concurrent.futures` / `asyncio`,不要照搬 Java 的 ExecutorService 抽象
@@ -57,7 +58,7 @@ LLM 走 OpenAI 兼容 API,配置走环境变量(`OPENAI_API_KEY` / `API_URL` / `
 
 - LLM 客户端已拆到 `llm/client.py`，消息/响应模型放在 `llm/types.py`。
 - 短期 memory / JSON 长期记忆已退出主路径；会话事实在 session 树里，长期事实在 `long_term.md`，压缩 token 估算优先使用 `tiktoken`。
-- 根目录旧入口/兼容文件已删除；Plan / Task / Planner 统一放在 `planning/`。
+- 根目录旧入口/兼容文件已删除；旧 Plan / Task / Planner 包已退出主路径。
 
 ## LSP / 类型检查
 

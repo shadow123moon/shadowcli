@@ -1,11 +1,7 @@
-flask>=2.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0
-sqlalchemy>=1.4.0
 openai>=1.0.0
 pydantic>=2.0.0
-duckduckgo-search>=3.0.0
 mcp>=1.0.0
 tiktoken>=0.7.0
-textual>=0.85.0
 prompt_toolkit>=3.0.0
