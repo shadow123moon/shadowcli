@@ -1,22 +1,85 @@
-"""统一的终端输出层。
-
-所有用户可见输出都走这里，方便：
-- 统一样式
-- 未来切换到事件总线 / TUI 库（rich 等）
-- 避免业务模块反向依赖 cli_app
-"""
+"""统一的终端输出层。"""
 import json
+import sys
 from typing import Any, TextIO
 
 from .renderer import BranchNavigationChoice
 
-TOOL_ARGUMENT_PREVIEW_CHARS = 300
-TOOL_RESULT_PREVIEW_CHARS = 180
+try:
+    from rich.console import Console
+    from rich.markdown import Heading, Markdown
+    from rich.text import Text
+    from rich.theme import Theme
+
+    _RICH_AVAILABLE = True
+except ImportError:
+    Console = None
+    Heading = None
+    Markdown = None
+    Text = None
+    Theme = None
+    _RICH_AVAILABLE = False
+
+TOOL_ARGUMENT_PREVIEW_CHARS = 200
+TOOL_RESULT_PREVIEW_CHARS = 150
+
+TOOL_ICONS = {
+    "read": "📄",
+    "write": "✏️",
+    "edit": "✏️",
+    "bash": "▶",
+    "grep": "🔍",
+    "find": "🔍",
+    "ls": "📁",
+    "web_search": "🌐",
+    "web_fetch": "🌐",
+}
+
+TOOL_RESULT_ERROR_PREFIXES = (
+    "工具执行失败",
+    "工具调用被拒绝",
+    "操作被拒绝",
+    "命令执行失败",
+    "命令超时",
+    "读取失败",
+    "写入失败",
+    "编辑失败",
+    "grep 失败",
+    "搜索失败",
+    "抓取失败",
+    "文件不存在",
+    "路径不存在",
+    "这是目录不是文件",
+    "文件太大",
+    "这是二进制文件",
+)
+
+
+if _RICH_AVAILABLE:
+    _TERMINAL_THEME = Theme({
+        "markdown.code": "cyan",
+        "repr.filename": "cyan",
+        "repr.path": "cyan",
+    })
+
+    class _LeftHeading(Heading):  # type: ignore[misc]
+        def __rich_console__(self, console, options):  # type: ignore[no-untyped-def]
+            text = self.text
+            text.justify = "left"
+            yield text
+
+    class _AssistantMarkdown(Markdown):  # pyright: ignore[reportGeneralTypeIssues]
+        elements = {**Markdown.elements, "heading_open": _LeftHeading}  # type: ignore[misc]
+
+else:
+    _TERMINAL_THEME = None
+    _AssistantMarkdown = None  # type: ignore[assignment]
 
 
 class TerminalRenderer:
     def __init__(self):
         self._content_parts: list[str] = []
+        self._pending_tool_contexts: list[dict[str, Any]] = []
 
     def message(self, message: str) -> None:
         self._flush_content()
@@ -29,14 +92,22 @@ class TerminalRenderer:
             return
         if event.type == "tool_call_start":
             self._flush_content()
-            print_tool_start(event.data["name"], event.data.get("args"))
+            tool_name = event.data["name"]
+            arguments = event.data.get("args")
+            self._remember_tool_context(tool_name, arguments)
+            print_tool_start(tool_name, arguments)
             return
         if event.type == "tool_result":
-            print_tool_result(event.data["name"], event.data["result"])
+            tool_name = event.data["name"]
+            context = self._pop_tool_context(tool_name)
+            print_tool_result(tool_name, event.data["result"], context=context)
             return
         if event.type == "error":
             self._flush_content()
-            _write(f"\n[ERROR] {event.data}")
+            if _rich_tty():
+                _console().print(f"\n[red bold]✗ Error:[/red bold] {event.data}")
+            else:
+                _write(f"\n✗ Error: {event.data}")
             return
         if event.type == "done":
             self._flush_content()
@@ -59,6 +130,37 @@ class TerminalRenderer:
         self._content_parts = []
         print_assistant_content(content)
 
+    def _remember_tool_context(self, tool_name: str, arguments: str | dict[str, Any] | None) -> None:
+        self._pending_tool_contexts.append({
+            "name": tool_name,
+            "args": _coerce_tool_arguments(arguments),
+        })
+
+    def _pop_tool_context(self, tool_name: str) -> dict[str, Any]:
+        for index, context in enumerate(self._pending_tool_contexts):
+            if context.get("name") == tool_name:
+                return self._pending_tool_contexts.pop(index)
+        return {"name": tool_name, "args": {}}
+
+
+def _stream_is_tty(out: TextIO | None = None) -> bool:
+    stream = out or sys.stdout
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _rich_tty(out: TextIO | None = None) -> bool:
+    return bool(_RICH_AVAILABLE and Console is not None and _stream_is_tty(out))
+
+
+def _console(out: TextIO | None = None):
+    return Console(
+        file=out or sys.stdout,
+        force_terminal=_stream_is_tty(out),
+        theme=_TERMINAL_THEME,
+        soft_wrap=True,
+    )
+
 
 def _write(message: str, out: TextIO | None = None, *, end: str = "\n", flush: bool = False) -> None:
     if out is not None:
@@ -71,24 +173,18 @@ def print_message(message: str) -> None:
     print(message)
 
 
-def print_content_delta(text: str, out: TextIO | None = None) -> None:
-    _write(text, out, end="", flush=True)
-
-
 def print_assistant_content(text: str, out: TextIO | None = None) -> None:
-    cleaned = (text or "").strip()
+    cleaned = (text or "").strip("\n")
     if not cleaned:
         return
-    if out is not None:
-        _write(cleaned, out)
+    if _RICH_AVAILABLE and _AssistantMarkdown is not None and Console is not None:
+        _console(out).print(_AssistantMarkdown(cleaned, justify="left", code_theme="ansi_dark"))
         return
-    try:
-        from rich.console import Console
-        from rich.markdown import Markdown
+    _write(_plain_markdown_text(cleaned), out)
 
-        Console().print(Markdown(cleaned))
-    except Exception:
-        print_message(cleaned)
+
+def _plain_markdown_text(text: str) -> str:
+    return text.replace("`", "").replace("**", "")
 
 
 def print_tool_start(
@@ -96,9 +192,20 @@ def print_tool_start(
     arguments: str | dict[str, Any] | None = None,
     out: TextIO | None = None,
 ) -> None:
+    icon = TOOL_ICONS.get(tool_name, "🔧")
     detail = format_tool_call_detail(tool_name, arguments)
+
+    if _rich_tty(out):
+        line = Text(f"\n{icon} ")
+        line.append(tool_name, "dim")
+        if detail:
+            line.append(" ")
+            line.append(detail, "dim cyan")
+        _console(out).print(line)
+        return
+
     suffix = f" {detail}" if detail else ""
-    _write(f"\n[tool] {tool_name}{suffix}", out, flush=True)
+    _write(f"\n{icon} {tool_name}{suffix}", out, flush=True)
 
 
 def format_tool_call_detail(tool_name: str, arguments: str | dict[str, Any] | None) -> str:
@@ -113,8 +220,7 @@ def format_tool_call_detail(tool_name: str, arguments: str | dict[str, Any] | No
     if not ordered_keys:
         return ""
 
-    parts = [f"{key}={_preview_argument(str(args[key]))}" for key in ordered_keys]
-    return " ".join(parts)
+    return " ".join(f"{key}={_preview_argument(str(args[key]))}" for key in ordered_keys)
 
 
 def _coerce_tool_arguments(arguments: str | dict[str, Any] | None) -> dict[str, Any]:
@@ -152,55 +258,147 @@ def _preview_argument(value: str) -> str:
     return compact[:TOOL_ARGUMENT_PREVIEW_CHARS] + f"...（{len(compact)} 字）"
 
 
-def print_tool_result(tool_name: str, result: str, out: TextIO | None = None) -> None:
+def print_tool_result(
+    tool_name: str,
+    result: str,
+    out: TextIO | None = None,
+    *,
+    context: dict[str, Any] | None = None,
+) -> None:
     summary = format_tool_result_summary(tool_name, result)
-    if summary:
-        _write(f"       result: {summary}", out)
+    if not summary and _should_show_successful_tool_result(tool_name, result, context):
+        _print_successful_tool_result(result, out, context=context)
+        return
+    if not summary:
+        return
 
-
-def print_command_result(agent_name: str, tool_name: str, result: str, out: TextIO | None = None) -> None:
-    _ = agent_name
-    print_tool_result(tool_name, result, out)
+    if _rich_tty(out):
+        _console(out).print(f"  [red]✗[/red] [dim red]{summary}[/dim red]")
+    else:
+        _write(f"  ✗ {summary}", out)
 
 
 def format_tool_result_summary(tool_name: str, result: str) -> str:
     _ = tool_name
     text = result or ""
     compact = " ".join(text.split())
-    if not compact:
-        return "无输出"
+    if not compact or not _is_tool_result_error(compact):
+        return ""
     if len(compact) <= TOOL_RESULT_PREVIEW_CHARS:
         return compact
     return f"已折叠 {len(text)} 字，预览: {compact[:TOOL_RESULT_PREVIEW_CHARS]}..."
 
 
-def render_agent_event(event, *, agent_name: str = "react", out: TextIO | None = None) -> bool:
-    if event.type == "content":
-        print_assistant_content(event.data, out)
-        return bool(event.data)
-    if event.type == "tool_call_start":
-        print_tool_start(event.data["name"], event.data.get("args"), out)
+def _is_tool_result_error(compact_result: str) -> bool:
+    return any(compact_result.startswith(prefix) for prefix in TOOL_RESULT_ERROR_PREFIXES)
+
+
+def _should_show_successful_tool_result(
+    tool_name: str,
+    result: str,
+    context: dict[str, Any] | None,
+) -> bool:
+    if tool_name != "bash":
         return False
-    if event.type == "tool_result":
-        print_command_result(agent_name, event.data["name"], event.data["result"], out)
+    if not (result or "").strip() or result.strip() == "命令执行成功（无输出）":
         return False
-    if event.type == "error":
-        _write(f"\n[ERROR] {event.data}", out)
-        return False
-    if event.type == "done":
-        reason = event.data.get("reason") if event.data else None
-        if reason == "cancelled":
-            print_cancelled()
-        return False
-    return False
+    return _is_git_diff_command(_tool_context_command(context))
+
+
+def _print_successful_tool_result(
+    result: str,
+    out: TextIO | None = None,
+    *,
+    context: dict[str, Any] | None = None,
+) -> None:
+    text = result.rstrip("\n")
+    if not text:
+        return
+
+    command = _tool_context_command(context)
+    if _rich_tty(out) and Text is not None:
+        if _is_git_diff_stat_command(command) and Text is not None:
+            _console(out).print(_diff_stat_text(text))
+            return
+        _console(out).print(_diff_text(text))
+        return
+
+    _write(text, out)
+
+
+def _tool_context_command(context: dict[str, Any] | None) -> str:
+    if not context:
+        return ""
+    args = context.get("args")
+    if not isinstance(args, dict):
+        return ""
+    return str(args.get("command") or "")
+
+
+def _is_git_diff_command(command: str) -> bool:
+    compact = " ".join(command.lower().split())
+    return compact == "git diff" or compact.startswith("git diff ")
+
+
+def _is_git_diff_stat_command(command: str) -> bool:
+    compact = " ".join(command.lower().split())
+    return _is_git_diff_command(compact) and " --stat" in f" {compact} "
+
+
+def _diff_stat_text(result: str):
+    if Text is None:
+        return result
+    text = Text()
+    for line_index, line in enumerate(result.splitlines()):
+        if line_index:
+            text.append("\n")
+        for char in line:
+            if char == "+":
+                text.append(char, "bold green")
+            elif char == "-":
+                text.append(char, "dim red")
+            else:
+                text.append(char)
+    return text
+
+
+def _diff_text(result: str):
+    if Text is None:
+        return result
+    text = Text()
+    for line_index, line in enumerate(result.splitlines()):
+        if line_index:
+            text.append("\n")
+        text.append(line, _diff_line_style(line))
+    return text
+
+
+def _diff_line_style(line: str) -> str:
+    if line.startswith("+") and not line.startswith("+++"):
+        return "bold green"
+    if line.startswith("-") and not line.startswith("---"):
+        return "dim red"
+    if line.startswith("@@"):
+        return "yellow"
+    if line.startswith(("diff --git", "index ", "---", "+++")):
+        return "dim cyan"
+    return ""
 
 
 def print_cancel_requested() -> None:
-    print("\n\n⚠️ 检测到 Ctrl+C，正在停止...", flush=True)
+    if _rich_tty():
+        _console().print("\n[yellow]⚠ 正在停止...[/yellow]")
+        sys.stdout.flush()
+    else:
+        print("\n⚠️ 检测到 Ctrl+C，正在停止...", flush=True)
 
 
 def print_cancelled() -> None:
-    print("\n\n⚠️ 已取消", flush=True)
+    if _rich_tty():
+        _console().print("\n[yellow]⚠ 已取消[/yellow]")
+        sys.stdout.flush()
+    else:
+        print("\n⚠️ 已取消", flush=True)
 
 
 def print_approval_request(level: str, tool_name: str, risk: str, arguments: dict) -> None:
