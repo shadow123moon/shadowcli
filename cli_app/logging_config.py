@@ -7,9 +7,12 @@ _CONSOLE_HANDLER_ATTR = "_shadowcli_console_handler"
 _CONSOLE_NOISY_FILTER_ATTR = "_shadowcli_console_noisy_filter"
 _DEBUG_HANDLER_ATTR = "_shadowcli_debug_handler"
 _NOISY_LOGGERS = (
+    "ddgs",
+    "duckduckgo_search",
     "httpx",
     "httpcore",
     "openai",
+    "primp",
     "requests",
     "urllib3",
 )
@@ -92,11 +95,18 @@ def _install_debug_file_handler(root_logger: logging.Logger, path: Path) -> None
 
 class _SuppressHttpNoiseFilter(logging.Filter):
     _NOISY_PREFIXES = (
+        "ddgs",
+        "duckduckgo_search",
         "httpx",
         "httpcore",
         "openai",
+        "primp",
         "requests",
         "urllib3",
+    )
+    _NOISY_MESSAGES = (
+        "response: ",
+        "Error in engine ",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -105,6 +115,8 @@ class _SuppressHttpNoiseFilter(logging.Filter):
 
         message = record.getMessage()
         if message.startswith("HTTP Request:") or message.startswith("HTTP Response:"):
+            return False
+        if message.startswith(self._NOISY_MESSAGES):
             return False
 
         return not record.name.startswith(self._NOISY_PREFIXES)

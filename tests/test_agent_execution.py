@@ -4,17 +4,20 @@ import io
 import logging
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import cli_app as cli
 from agent.agent_loop import AgentLoop
+from agent.prompts import react_agent_prompt
 from agent.react_agent import ReactAgent
 from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
-from llm import FunctionCall, Message, ToolCall
+from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
-from sessions import BranchSummaryEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
+from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
 from tooling import (
     BashTool,
     EditTool,
@@ -83,14 +86,15 @@ class ReactAgentTests(unittest.TestCase):
         self.assertEqual(calls[0][0][-1].content, "你好")
         self.assertIsNone(calls[0][1])
 
-    def test_react_greeting_does_not_receive_tools(self):
+    def test_react_always_receives_tools_when_registry_has_definitions(self):
         calls = []
         agent = ReactAgent(_ToolDefinitionRegistry())
 
         with patch("agent.agent_loop.chat_stream", _stream_content(calls, "你好")):
             agent.run("你好")
 
-        self.assertEqual([tools for _, tools in calls], [None])
+        self.assertIsNotNone(calls[0][1])
+        self.assertEqual(calls[0][1][0]["function"]["name"], "read")
 
     def test_react_file_task_receives_tools(self):
         calls = []
@@ -101,6 +105,41 @@ class ReactAgentTests(unittest.TestCase):
 
         self.assertIsNotNone(calls[0][1])
         self.assertEqual(calls[0][1][0]["function"]["name"], "read")
+
+    def test_react_file_task_hides_duplicate_mcp_tools_by_default(self):
+        calls = []
+        agent = ReactAgent(_MixedToolDefinitionRegistry())
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "可以统计")):
+            agent.run("统计这个项目的 Python 代码量")
+
+        names = [tool["function"]["name"] for tool in calls[0][1]]
+        self.assertIn("bash", names)
+        self.assertNotIn("mcp__filesystem__search_files", names)
+
+    def test_react_mcp_task_can_receive_mcp_tools(self):
+        calls = []
+        agent = ReactAgent(_MixedToolDefinitionRegistry())
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "可以用 MCP")):
+            agent.run("用 MCP filesystem 列出项目文件")
+
+        names = [tool["function"]["name"] for tool in calls[0][1]]
+        self.assertIn("bash", names)
+        self.assertIn("mcp__filesystem__search_files", names)
+
+    def test_react_agent_prompt_injects_working_directory(self):
+        prompt = react_agent_prompt("- read: 读取文件", cwd="E:/demo/project")
+
+        self.assertIn("E:/demo/project", prompt)
+        self.assertIn("cwd", prompt)
+
+    def test_react_system_prompt_carries_current_working_directory(self):
+        agent = ReactAgent(_ToolDefinitionRegistry())
+
+        system_message = agent.conversation_messages[0]
+        self.assertEqual(system_message.role, "system")
+        self.assertIn(os.getcwd(), system_message.content)
 
     def test_react_keeps_tool_call_and_result_messages_between_turns(self):
         calls = []
@@ -329,6 +368,179 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("被拒绝", output)
         self.assertIn("WARNING", output)
 
+    def test_stream_usage_is_recorded_and_token_budget_stops_before_tool_execution(self):
+        calls = []
+        registry = CaptureRegistry()
+        registry.tools["read"] = _StubTool("不应执行")
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            yield StreamEvent(
+                "tool_call",
+                {
+                    "id": "call-read",
+                    "type": "function",
+                    "name": "read",
+                    "arguments": '{"path": "demo.txt"}',
+                },
+            )
+            yield StreamEvent("done", {
+                "usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 3,
+                    "prompt_tokens_details": {"cached_tokens": 2},
+                }
+            })
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        with patch.dict(os.environ, {"PAICLI_REACT_TOKEN_BUDGET": "10"}, clear=False):
+            with patch("agent.agent_loop.chat_stream", fake_stream):
+                events = list(agent.execute(Message(role="user", content="读取文件")))
+
+        done = [event for event in events if event.type == "done"][-1]
+        content = "".join(event.data for event in events if event.type == "content")
+        self.assertEqual(done.data["reason"], "token_budget_exceeded")
+        self.assertIn("Token 预算已用尽", content)
+        self.assertEqual(registry.executed, [])
+        self.assertEqual(len(calls), 1)
+
+    def test_repeated_tool_calls_are_detected_across_model_iterations(self):
+        calls = []
+        registry = CaptureRegistry()
+        registry.tools["read"] = _StubTool("same")
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            yield StreamEvent(
+                "tool_call",
+                {
+                    "id": f"call-read-{len(calls)}",
+                    "type": "function",
+                    "name": "read",
+                    "arguments": '{"path": "same.txt"}',
+                },
+            )
+            yield StreamEvent("done", None)
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        with patch.dict(os.environ, {"PAICLI_REACT_STAGNATION_WINDOW": "2"}, clear=False):
+            with patch("agent.agent_loop.chat_stream", fake_stream):
+                events = list(agent.execute(Message(role="user", content="重复读取")))
+
+        done = [event for event in events if event.type == "done"][-1]
+        self.assertEqual(done.data["reason"], "stagnation_detected")
+        self.assertEqual(registry.executed, [("read", {"path": "same.txt"})])
+
+    def test_tool_result_containing_rejection_phrase_does_not_stop_loop(self):
+        calls = []
+        registry = CaptureRegistry()
+        registry.tools["read"] = _StubTool('源码片段：if "工具调用被拒绝" in result: ...')
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            if len(calls) == 1:
+                yield StreamEvent(
+                    "tool_call",
+                    {
+                        "id": "call-read",
+                        "type": "function",
+                        "name": "read",
+                        "arguments": '{"path": "agent_loop.py"}',
+                    },
+                )
+                yield StreamEvent("done", None)
+            else:
+                yield StreamEvent("content", "读到了源码")
+                yield StreamEvent("done", None)
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        with patch("agent.agent_loop.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="读取 agent_loop.py")))
+
+        done = [event for event in events if event.type == "done"][-1]
+        self.assertEqual(done.data["reason"], "finished")
+        self.assertEqual(registry.executed, [("read", {"path": "agent_loop.py"})])
+        self.assertEqual(len(calls), 2)
+        tool_result = [event for event in events if event.type == "tool_result"][-1]
+        self.assertIn("工具调用被拒绝", tool_result.data["result"])
+
+    def test_read_only_tool_calls_run_in_parallel_until_write_boundary(self):
+        calls = []
+        registry = _TimedRegistry(delay=0.2)
+
+        first_batch = [
+            ("read", "r1"),
+            ("grep", "g1"),
+            ("edit", "e1"),
+            ("find", "f2"),
+            ("read", "r2"),
+            ("edit", "e2"),
+        ]
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            if len(calls) == 1:
+                for name, label in first_batch:
+                    yield StreamEvent(
+                        "tool_call",
+                        {
+                            "id": f"call-{label}",
+                            "type": "function",
+                            "name": name,
+                            "arguments": f'{{"label": "{label}"}}',
+                        },
+                    )
+                yield StreamEvent("done", None)
+            else:
+                yield StreamEvent("content", "完成")
+                yield StreamEvent("done", None)
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        start = time.perf_counter()
+        with patch("agent.agent_loop.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="批量处理工具")))
+        elapsed = time.perf_counter() - start
+
+        tool_results = [event.data["result"] for event in events if event.type == "tool_result"]
+        self.assertEqual(tool_results, ["read:r1", "grep:g1", "edit:e1", "find:f2", "read:r2", "edit:e2"])
+        self.assertLess(elapsed, 1.0)
+
+        timeline = registry.timeline_by_label()
+        self.assertLess(timeline["r1"]["start"], timeline["g1"]["end"])
+        self.assertLess(timeline["g1"]["start"], timeline["r1"]["end"])
+        self.assertGreater(timeline["e1"]["start"], timeline["r1"]["end"])
+        self.assertGreater(timeline["e1"]["start"], timeline["g1"]["end"])
+        self.assertGreater(timeline["f2"]["start"], timeline["e1"]["end"])
+        self.assertGreater(timeline["r2"]["start"], timeline["e1"]["end"])
+        self.assertLess(timeline["f2"]["start"], timeline["r2"]["end"])
+        self.assertLess(timeline["r2"]["start"], timeline["f2"]["end"])
+        self.assertGreater(timeline["e2"]["start"], timeline["f2"]["end"])
+        self.assertGreater(timeline["e2"]["start"], timeline["r2"]["end"])
+
 
 class CliAgentTests(unittest.TestCase):
     def test_tree_and_jump_commands_are_parsed(self):
@@ -337,6 +549,67 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(cli.parse_jump_command("/jump"), "")
         self.assertEqual(cli.parse_jump_command("/jump abc123"), "abc123")
         self.assertIsNone(cli.parse_jump_command("/jumpabc123"))
+        self.assertEqual(cli.parse_compact_command("/compact"), "")
+        self.assertIsNone(cli.parse_compact_command("/compact now"))
+
+    def test_resume_menu_does_not_use_session_id_as_title(self):
+        import cli_app.router as router
+        from sessions import SessionMeta
+
+        meta = SessionMeta(
+            version=1,
+            session_id="20260530_225232_5eac86",
+            title=None,
+            created_at="2026-05-30T14:56:44",
+            updated_at="2026-05-30T14:56:44",
+            message_count=38,
+        )
+
+        option = router._resume_select_options([meta])[0]
+
+        self.assertEqual(option.label, "未命名对话")
+        self.assertNotIn(meta.session_id, option.label)
+
+    def test_prompt_falls_back_to_plain_input_when_prompt_toolkit_unavailable(self):
+        import cli_app.terminal_input as terminal_input
+
+        with (
+            patch("cli_app.terminal_input._can_use_prompt_toolkit", return_value=True),
+            patch("cli_app.terminal_input._build_prompt_toolkit_paste_prompt", side_effect=ImportError),
+            patch("builtins.input", return_value="/help") as input_mock,
+        ):
+            prompt = terminal_input.build_prompt()
+            line = prompt()
+
+        self.assertEqual(line, "/help")
+        input_mock.assert_called_once_with("\n> ")
+
+    def test_prompt_uses_paste_prompt_when_prompt_toolkit_available(self):
+        import cli_app.terminal_input as terminal_input
+
+        prompt_func = lambda: "ok"
+        with (
+            patch("cli_app.terminal_input._can_use_prompt_toolkit", return_value=True),
+            patch("cli_app.terminal_input._build_prompt_toolkit_paste_prompt", return_value=prompt_func),
+        ):
+            prompt = terminal_input.build_prompt()
+
+        self.assertIs(prompt, prompt_func)
+
+    def test_paste_placeholder_summarizes_multiline_text(self):
+        import cli_app.terminal_input as terminal_input
+
+        text = "a\r\nb\rc\n"
+        normalized = terminal_input._normalize_paste_text(text)
+        placeholder = terminal_input._paste_placeholder(1, normalized)
+        expanded = terminal_input._expand_paste_placeholders(
+            f"请看 {placeholder}",
+            {placeholder: normalized},
+        )
+
+        self.assertEqual(normalized, "a\nb\nc\n")
+        self.assertEqual(placeholder, "[Pasted text #1 +3 lines]")
+        self.assertEqual(expanded, "请看 a\nb\nc\n")
 
     def test_format_session_tree_marks_current_branch_and_leaf(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,9 +624,10 @@ class CliAgentTests(unittest.TestCase):
         self.assertIn("旧分支问题", tree)
         self.assertIn("<- current", tree)
 
-    def test_repl_builds_agent_with_tool_runtime_and_message_callback(self):
+    def test_repl_builds_agent_with_tool_runtime_and_message_callback_on_first_message(self):
         runtime = ToolRuntime(ToolRegistry())
         seen = []
+        renderer = _CaptureRenderer()
 
         def remember_registry(registry, *, conversation_messages=None, on_message_appended=None):
             seen.append((registry, conversation_messages, callable(on_message_appended)))
@@ -368,16 +642,15 @@ class CliAgentTests(unittest.TestCase):
             patch("cli_app.runner.SessionStore", return_value=_StubSessionStore()),
             patch("cli_app.runner.load_mcp_config", return_value={}),
             patch("cli_app.runner.build_agent", side_effect=remember_registry),
-            patch("cli_app.runner.print_message"),
-            patch("builtins.input", side_effect=EOFError),
+            patch("builtins.input", side_effect=["你好", EOFError]),
         ):
-            runner.repl()
+            runner.repl(renderer=renderer)
 
         self.assertEqual(seen, [(runtime, [], True)])
 
     def test_repl_tree_command_prints_session_tree(self):
         runtime = ToolRuntime(ToolRegistry())
-        printed = []
+        renderer = _CaptureRenderer()
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, old_leaf_id = _branching_session(Path(tmp))
@@ -390,19 +663,19 @@ class CliAgentTests(unittest.TestCase):
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
                 patch("cli_app.runner.build_agent", return_value=_StubReactAgent()),
-                patch("cli_app.runner.print_message", side_effect=printed.append),
-                patch("builtins.input", side_effect=["/tree", EOFError]),
+                patch("builtins.input", side_effect=["/tree", "", EOFError]),
             ):
-                runner.repl()
+                runner.repl(renderer=renderer)
 
-        output = "\n".join(printed)
+        output = "\n".join(renderer.messages)
         self.assertIn(target_id, output)
         self.assertIn(old_leaf_id, output)
-        self.assertIn("<- current", output)
+        self.assertIn("current", output)
 
     def test_repl_jump_command_moves_leaf_and_reloads_agent_history(self):
         runtime = ToolRuntime(ToolRegistry())
         agent = _StubReactAgent()
+        renderer = _CaptureRenderer(branch_choice=BranchNavigationChoice.DIRECT)
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, old_leaf_id = _branching_session(Path(tmp))
@@ -415,11 +688,9 @@ class CliAgentTests(unittest.TestCase):
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
                 patch("cli_app.runner.build_agent", return_value=agent),
-                patch("cli_app.runner.ask_branch_navigation_choice", return_value=BranchNavigationChoice.DIRECT),
-                patch("cli_app.runner.print_message"),
                 patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
             ):
-                runner.repl()
+                runner.repl(renderer=renderer)
 
         self.assertEqual(session.get_leaf_id(), target_id)
         self.assertIn(old_leaf_id, {entry.id for entry in session.all_entries()})
@@ -427,6 +698,7 @@ class CliAgentTests(unittest.TestCase):
 
     def test_repl_jump_summary_choice_uses_summary_generator(self):
         runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer(branch_choice=BranchNavigationChoice.SUMMARIZE)
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, _old_leaf_id = _branching_session(Path(tmp))
@@ -439,16 +711,106 @@ class CliAgentTests(unittest.TestCase):
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
                 patch("cli_app.runner.build_agent", return_value=_StubReactAgent()),
-                patch("cli_app.runner.ask_branch_navigation_choice", return_value=BranchNavigationChoice.SUMMARIZE),
                 patch("cli_app.runner.generate_branch_summary", return_value="总结旧分支"),
-                patch("cli_app.runner.print_message"),
                 patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
             ):
-                runner.repl()
+                runner.repl(renderer=renderer)
 
         leaf = session.all_entries()[-1]
         self.assertIsInstance(leaf, BranchSummaryEntry)
         self.assertEqual(leaf.summary, "总结旧分支")
+
+    def test_repl_jump_uses_injected_renderer_for_branch_choice_and_messages(self):
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer(branch_choice=BranchNavigationChoice.DIRECT)
+        agent = _StubReactAgent()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session, target_id, _old_leaf_id = _branching_session(Path(tmp))
+            import cli_app.runner as runner
+            with (
+                patch("cli_app.runner.load_dotenv"),
+                patch("cli_app.runner.configure_logging"),
+                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("cli_app.runner.build_agent", return_value=agent),
+                patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        self.assertEqual(renderer.branch_plans[0].to_id, target_id)
+        self.assertTrue(any(message.startswith("已跳转到:") for message in renderer.messages))
+        self.assertEqual([message.content for message in agent.reloaded[-1]], ["root", "fork"])
+
+    def test_repl_compact_command_appends_compaction_and_reloads_agent_history(self):
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            session = SessionStore(root=Path(tmp) / "sessions").create(cwd)
+            session.append_message(Message(role="user", content="旧问题"))
+            session.append_message(Message(role="assistant", content="旧回答"))
+            session.append_message(Message(role="user", content="新问题"))
+            session.append_message(Message(role="assistant", content="新回答"))
+
+            import cli_app.runner as runner
+            with (
+                patch("cli_app.runner.load_dotenv"),
+                patch("cli_app.runner.configure_logging"),
+                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("cli_app.runner.build_agent", return_value=agent),
+                patch("cli_app.runner.chat", return_value=ChatResponse(content="旧对话已压缩")),
+                patch("builtins.input", side_effect=["/compact", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        leaf = session.all_entries()[-1]
+        self.assertIsInstance(leaf, CompactionEntry)
+        self.assertEqual([message.content for message in agent.reloaded[-1]], ["新问题", "新回答"])
+        self.assertIn("已压缩", "\n".join(renderer.messages))
+
+    def test_repl_auto_compacts_before_running_when_branch_exceeds_threshold(self):
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            session = SessionStore(root=Path(tmp) / "sessions").create(cwd)
+            session.append_message(Message(role="user", content="旧问题"))
+            session.append_message(Message(role="assistant", content="旧回答"))
+            session.append_message(Message(role="user", content="新问题"))
+            session.append_message(Message(role="assistant", content="新回答"))
+
+            import cli_app.runner as runner
+            with (
+                patch.dict(os.environ, {"PAICLI_COMPACT_MAX_TOKENS": "1"}, clear=False),
+                patch("cli_app.runner.load_dotenv"),
+                patch("cli_app.runner.configure_logging"),
+                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=TextLongTermMemory(Path(tmp) / "long_term.md")),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("cli_app.runner.build_agent", return_value=agent),
+                patch("cli_app.runner.chat", return_value=ChatResponse(content="旧对话已压缩")),
+                patch("builtins.input", side_effect=["继续", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        leaf = session.all_entries()[-1]
+        self.assertIsInstance(leaf, CompactionEntry)
+        self.assertEqual([message.content for message in agent.reloaded[-1]], ["新问题", "新回答"])
+        self.assertEqual(agent.inputs[0][0], "继续")
+        self.assertIn("旧对话已压缩", agent.inputs[0][1])
 
     def test_cli_default_agent_is_react_agent(self):
         agent = cli.build_agent(CaptureRegistry())
@@ -475,40 +837,24 @@ class CliAgentTests(unittest.TestCase):
 
         self.assertEqual(react.inputs, [("你好", "")])
 
+    def test_run_once_routes_agent_events_to_injected_renderer(self):
+        react = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        cli.run_once(react, "你好", renderer=renderer)
+
+        self.assertEqual(react.inputs, [("你好", "")])
+        self.assertEqual([event.type for event in renderer.events], ["content", "done"])
+
     def test_run_once_routes_plan_command_to_react_agent(self):
         react = _StubReactAgent()
 
-        with tempfile.TemporaryDirectory() as tmp:
-            with contextlib.redirect_stdout(io.StringIO()):
-                cli.run_once(react, "/plan 统计当前目录", plan_log_dir=Path(tmp))
+        with contextlib.redirect_stdout(io.StringIO()):
+            cli.run_once(react, "/plan 统计当前目录")
 
         self.assertEqual(len(react.inputs), 1)
         self.assertIn("单 Agent 计划执行模式", react.inputs[0][0])
         self.assertIn("统计当前目录", react.inputs[0][0])
-
-    def test_plan_run_does_not_write_legacy_plan_log_file(self):
-        react = _StubReactAgent()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                cli.run_once(react, "/plan 统计当前目录", plan_log_dir=Path(tmp))
-
-            log_files = list(Path(tmp).glob("*.log"))
-
-        self.assertEqual(log_files, [])
-        self.assertNotIn("计划日志:", output.getvalue())
-
-    def test_plain_react_run_does_not_write_plan_log_file(self):
-        react = _StubReactAgent()
-
-        with tempfile.TemporaryDirectory() as tmp:
-            with contextlib.redirect_stdout(io.StringIO()):
-                cli.run_once(react, "你好", plan_log_dir=Path(tmp))
-
-            log_files = list(Path(tmp).glob("*.log"))
-
-        self.assertEqual(log_files, [])
 
     def test_run_once_passes_context_to_agent_events(self):
         react = _StubReactAgent()
@@ -565,6 +911,23 @@ class CliAgentTests(unittest.TestCase):
 
         self.assertIn("deep debug detail", content)
         self.assertNotIn("deep debug detail", errors.getvalue())
+
+    def test_configure_logging_suppresses_search_backend_info_logs(self):
+        errors = io.StringIO()
+
+        with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
+            os.environ["PAICLI_LOG_LEVEL"] = "INFO"
+            os.environ.pop("PAICLI_DEBUG_LOG", None)
+            with contextlib.redirect_stderr(errors):
+                cli.configure_logging()
+                logging.getLogger("ddgs").info("response: https://example.test 200")
+                logging.getLogger("duckduckgo_search").info("Error in engine mojeek: TimeoutException")
+                logging.getLogger("tests.visible").info("visible info")
+
+        text = errors.getvalue()
+        self.assertNotIn("response: https://example.test 200", text)
+        self.assertNotIn("Error in engine mojeek", text)
+        self.assertIn("visible info", text)
 
     def test_remember_command_writes_long_term_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -692,6 +1055,28 @@ class _StubReactAgent:
         self.reloaded.append(list(messages))
 
 
+class _CaptureRenderer:
+    def __init__(self, branch_choice=BranchNavigationChoice.CANCEL):
+        self.branch_choice = branch_choice
+        self.messages = []
+        self.events = []
+        self.cancel_requested_count = 0
+        self.branch_plans = []
+
+    def message(self, message):
+        self.messages.append(message)
+
+    def agent_event(self, event, *, agent_name="react"):
+        self.events.append(event)
+
+    def cancel_requested(self):
+        self.cancel_requested_count += 1
+
+    def branch_navigation_choice(self, plan=None):
+        self.branch_plans.append(plan)
+        return self.branch_choice
+
+
 class _FailingReactAgent:
     def events(self, user_input, context=""):
         raise RuntimeError("boom")
@@ -716,6 +1101,7 @@ class _StubSession:
     path = Path(".")
 
     def __init__(self):
+        self.meta = type("Meta", (), {"session_id": "stub-session"})()
         self.appended = []
 
     def messages(self):
@@ -723,6 +1109,12 @@ class _StubSession:
 
     def append_message(self, message):
         self.appended.append(message)
+
+    def summary_text(self):
+        return ""
+
+    def get_branch(self):
+        return []
 
 
 class _StubSessionStore:
@@ -799,6 +1191,31 @@ class _StubTool:
         return self.result
 
 
+class _TimedRegistry:
+    def __init__(self, delay):
+        self.delay = delay
+        self.events = []
+        self._lock = threading.Lock()
+
+    def get_all_definitions(self):
+        return []
+
+    def execute(self, name, arguments):
+        label = arguments["label"]
+        with self._lock:
+            self.events.append(("start", label, time.perf_counter()))
+        time.sleep(self.delay)
+        with self._lock:
+            self.events.append(("end", label, time.perf_counter()))
+        return f"{name}:{label}"
+
+    def timeline_by_label(self):
+        timeline = {}
+        for event, label, timestamp in self.events:
+            timeline.setdefault(label, {})[event] = timestamp
+        return timeline
+
+
 class _ExecuteOnlyRegistry:
     def __init__(self):
         self.calls = []
@@ -839,6 +1256,31 @@ class _ToolDefinitionRegistry:
         return "executed"
 
 
+class _MixedToolDefinitionRegistry:
+    def get_all_definitions(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "执行命令",
+                    "parameters": {},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__filesystem__search_files",
+                    "description": "Search files through MCP filesystem",
+                    "parameters": {},
+                },
+            },
+        ]
+
+    def execute(self, name, arguments):
+        return "executed"
+
+
 class BashToolTests(unittest.TestCase):
     def test_bash_supports_ls_in_project_shell(self):
         result = BashTool().execute({"command": "ls -l ."})
@@ -863,6 +1305,12 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("命令超时", result)
         self.assertIn("超过 1 秒", result)
 
+    def test_bash_description_explains_windows_powershell_semantics(self):
+        tool = BashTool()
+
+        self.assertIn("PowerShell", tool.description)
+        self.assertIn("不要再嵌套 powershell -Command", tool.parameters["properties"]["command"]["description"])
+
 
 class PiStyleToolTests(unittest.TestCase):
     def test_read_write_edit_use_pi_style_names(self):
@@ -880,10 +1328,49 @@ class PiStyleToolTests(unittest.TestCase):
             self.assertEqual(WriteTool().name, "write")
             self.assertEqual(ReadTool().name, "read")
             self.assertEqual(EditTool().name, "edit")
-            self.assertIn("写入成功", write_out)
-            self.assertEqual(read_out, "hello old")
+            self.assertIn("已创建", write_out)
+            self.assertIn("hello old", read_out)
             self.assertIn("编辑成功", edit_out)
             self.assertEqual(path.read_text(encoding="utf-8"), "hello new")
+
+    def test_read_can_read_multiple_paths_in_one_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "a.txt"
+            second = root / "b.txt"
+            first.write_text("alpha\n", encoding="utf-8")
+            second.write_text("beta\n", encoding="utf-8")
+
+            out = ReadTool().execute({"paths": [str(first), str(second)]})
+
+            self.assertIn(f"==> {first}", out)
+            self.assertIn("alpha", out)
+            self.assertIn(f"==> {second}", out)
+            self.assertIn("beta", out)
+            self.assertLess(out.index(str(first)), out.index(str(second)))
+
+    def test_read_multiple_paths_runs_reads_concurrently(self):
+        class SlowReadTool(ReadTool):
+            def _read_one(self, arguments):
+                time.sleep(0.2)
+                return super()._read_one(arguments)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = []
+            for index in range(3):
+                path = root / f"{index}.txt"
+                path.write_text(f"file {index}\n", encoding="utf-8")
+                paths.append(str(path))
+
+            start = time.perf_counter()
+            out = SlowReadTool().execute({"paths": paths})
+            elapsed = time.perf_counter() - start
+
+            self.assertIn("file 0", out)
+            self.assertIn("file 1", out)
+            self.assertIn("file 2", out)
+            self.assertLess(elapsed, 0.45)
 
     def test_edit_rejects_ambiguous_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -942,7 +1429,7 @@ class PiStyleToolTests(unittest.TestCase):
             registry.execute("write", {"path": str(path), "content": "ok"})
             out = registry.execute("read", {"path": str(path)})
 
-        self.assertEqual(out, "ok")
+        self.assertIn("ok", out)
 
     def test_file_write_tools_do_not_require_approval_by_default(self):
         self.assertFalse(WriteTool().requires_approval({"path": "demo.txt"}))

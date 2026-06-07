@@ -30,11 +30,9 @@ def run_once(
     agent: ReactAgent,
     user_input: str,
     *,
-    plan_log_dir: Path | None = None,
     runtime_context_builder: RuntimeContextBuilder | None = None,
     renderer: Renderer | None = None,
 ) -> None:
-    _ = plan_log_dir
     renderer = renderer or TerminalRenderer()
     try:
         plan_input = parse_plan_command(user_input)
@@ -119,7 +117,6 @@ def repl(renderer: Renderer | None = None) -> int:
             try:
                 line = prompt().strip()
             except (EOFError, KeyboardInterrupt):
-                renderer.message("\n再见。")
                 break
 
             if not router.route(line):
@@ -160,68 +157,3 @@ def _render_mcp_status(renderer: Renderer, *, mcp_loaded: int, mcp_failed: int) 
         renderer.message(f"✓ 已加载 {mcp_loaded} 个 MCP server")
     if mcp_failed > 0:
         renderer.message(f"✗ {mcp_failed} 个 MCP server 启动失败")
-
-
-def run_tui_mode() -> int:
-    """启动 Textual TUI 模式。"""
-    try:
-        from ui.textual_app import PaiCLIApp
-    except ImportError as e:
-        log.error("无法导入 Textual: %s", e)
-        print("错误: Textual TUI 依赖未安装。请运行: pip install textual")
-        print("回退到标准 REPL 模式...")
-        return repl()
-
-    load_dotenv()
-    configure_logging()
-
-    # 重定向日志到文件，避免污染 TUI
-    import logging.handlers
-    log_file = Path.cwd() / ".paicli" / "tui.log"
-    log_file.parent.mkdir(exist_ok=True)
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=3,
-    )
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    ))
-    logging.root.addHandler(file_handler)
-    logging.root.setLevel(logging.DEBUG)
-
-    runtime = build_registry()
-    cwd = Path.cwd()
-    session_store = SessionStore()
-    long_term = build_long_term_memory(session_store.project_dir(cwd) / "long_term.md")
-
-    mcp_manager = McpServerManager()
-    try:
-        mcp_loaded, mcp_failed = _load_mcp_tools(runtime, mcp_manager)
-
-        startup_messages = []
-        if mcp_loaded > 0:
-            startup_messages.append((f"✓ 已加载 {mcp_loaded} 个 MCP server", "green"))
-        if mcp_failed > 0:
-            startup_messages.append((f"✗ {mcp_failed} 个 MCP server 启动失败", "red"))
-
-        app = PaiCLIApp(
-            session_manager=None,
-            agent=None,
-            runtime=runtime,
-            long_term=long_term,
-            startup_messages=startup_messages,
-            session_store=session_store,
-            cwd=cwd,
-        )
-
-        app.run()
-        return 0
-    except Exception as e:
-        log.exception("TUI 启动失败")
-        print(f"错误: TUI 启动失败: {e}")
-        print("回退到标准 REPL 模式...")
-        return repl()
-    finally:
-        log.debug("Shutting down MCP servers...")
-        mcp_manager.shutdown()

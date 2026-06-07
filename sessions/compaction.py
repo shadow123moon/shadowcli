@@ -10,8 +10,11 @@ from .entries import CompactionEntry, MessageEntry
 from .manager import SessionManager
 
 
-DEFAULT_COMPACT_MAX_TOKENS = 24_000
-DEFAULT_COMPACT_KEEP_TOKENS = 8_000
+DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000
+DEFAULT_COMPACT_TRIGGER_RATIO = 0.80
+DEFAULT_COMPACT_KEEP_RATIO = 1 / 3
+DEFAULT_COMPACT_MAX_TOKENS = int(DEFAULT_CONTEXT_WINDOW_TOKENS * DEFAULT_COMPACT_TRIGGER_RATIO)
+DEFAULT_COMPACT_KEEP_TOKENS = int(DEFAULT_COMPACT_MAX_TOKENS * DEFAULT_COMPACT_KEEP_RATIO)
 
 
 @dataclass
@@ -39,8 +42,10 @@ def compact_session(
     force: bool = False,
     chat_fn=chat,
 ) -> CompactionResult:
-    max_tokens = max_tokens or _read_int_env("PAICLI_COMPACT_MAX_TOKENS", DEFAULT_COMPACT_MAX_TOKENS)
-    keep_tokens = keep_tokens or _read_int_env("PAICLI_COMPACT_KEEP_TOKENS", DEFAULT_COMPACT_KEEP_TOKENS)
+    default_max_tokens = _default_compact_max_tokens()
+    max_tokens = max_tokens or _read_int_env("PAICLI_COMPACT_MAX_TOKENS", default_max_tokens)
+    default_keep_tokens = max(1, int(max_tokens * DEFAULT_COMPACT_KEEP_RATIO))
+    keep_tokens = keep_tokens or _read_int_env("PAICLI_COMPACT_KEEP_TOKENS", default_keep_tokens)
     plan = plan_compaction(
         session,
         max_tokens=max_tokens,
@@ -286,3 +291,22 @@ def _read_int_env(key: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _read_float_env(key: str, default: float) -> float:
+    raw = os.environ.get(key)
+    if not raw or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _default_compact_max_tokens() -> int:
+    context_window = _read_int_env("PAICLI_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS)
+    trigger_ratio = _read_float_env("PAICLI_COMPACT_TRIGGER_RATIO", DEFAULT_COMPACT_TRIGGER_RATIO)
+    if trigger_ratio > 1:
+        trigger_ratio = DEFAULT_COMPACT_TRIGGER_RATIO
+    return max(1, int(context_window * trigger_ratio))

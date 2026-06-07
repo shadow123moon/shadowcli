@@ -1,5 +1,6 @@
 import fnmatch
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict
 
@@ -15,6 +16,8 @@ _BINARY_SNIFF_BYTES = 8192
 _GREP_MAX_HITS = 200
 _GREP_MAX_LINE = 500
 _FIND_MAX_HITS = 500
+_MAX_PARALLEL_READS = 8
+_MAX_READ_PATHS = 20
 
 
 class ReadTool(Tool):
@@ -32,6 +35,7 @@ class ReadTool(Tool):
 
 用法：
 - path: 文件路径（必填）
+- paths: 多个文件路径；需要一次查看多个文件时使用
 - offset: 从第几行开始读（从 1 开始，默认 1）
 - limit: 最多读多少行（默认 2000）
 
@@ -51,13 +55,50 @@ class ReadTool(Tool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "文件路径"},
+                "paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "多个文件路径；需要一次查看多个文件时使用。与 path 二选一",
+                },
                 "offset": {"type": "integer", "description": "起始行号（从 1 开始），默认 1"},
                 "limit": {"type": "integer", "description": "最多读取行数，默认 2000"},
             },
-            "required": ["path"],
+            "required": [],
         }
 
     def execute(self, arguments: Dict) -> str:
+        if "paths" in arguments:
+            return self._read_many(arguments)
+        if "path" not in arguments:
+            return "读取失败: 必须提供 path 或 paths"
+        return self._read_one(arguments)
+
+    def _read_many(self, arguments: Dict) -> str:
+        paths = arguments.get("paths")
+        if isinstance(paths, str):
+            paths = [paths]
+        if not isinstance(paths, list) or not paths:
+            return "读取失败: paths 必须是非空文件路径列表"
+        if len(paths) > _MAX_READ_PATHS:
+            return f"读取失败: 一次最多读取 {_MAX_READ_PATHS} 个文件"
+
+        offset = arguments.get("offset")
+        limit = arguments.get("limit")
+        read_args = [
+            {"path": str(path), "offset": offset, "limit": limit}
+            for path in paths
+        ]
+
+        worker_count = min(len(read_args), _MAX_PARALLEL_READS)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            results = list(executor.map(self._read_one, read_args))
+
+        sections = []
+        for args, result in zip(read_args, results):
+            sections.append(f"==> {Path(args['path'])}\n{result}")
+        return "\n\n".join(sections)
+
+    def _read_one(self, arguments: Dict) -> str:
         path = Path(arguments["path"])
 
         if not path.exists():

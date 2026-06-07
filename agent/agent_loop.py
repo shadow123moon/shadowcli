@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from extensions.tool_runtime import ToolExecutionBlocked
@@ -25,6 +26,18 @@ TOOL_ERROR_PREFIXES = (
     "抓取失败",
     "编辑失败",
 )
+TOOL_EFFECTS = {
+    "read": "read",
+    "ls": "read",
+    "grep": "read",
+    "find": "read",
+    "web_search": "read",
+    "web_fetch": "read",
+    "write": "write",
+    "edit": "write",
+    "bash": "write",
+}
+MAX_PARALLEL_TOOL_CALLS = 8
 
 ChatFn = Callable[..., object]
 MessageSink = Callable[[Message], None]
@@ -162,29 +175,10 @@ class AgentLoop:
                 yield from _budget_exit_events(self.name, budget, exit_reason)
                 return
 
-            for tc in tool_calls_data:
-                if self.cancel.is_set():
-                    yield StreamEvent("content", "\n⏹️ 用户取消")
-                    yield StreamEvent("done", {"reason": "cancelled"})
-                    return
-
-                yield StreamEvent("tool_call_start", {"name": tc["name"], "args": tc["arguments"]})
-                tool_call_obj = ToolCall(
-                    id=tc["id"],
-                    type="function",
-                    function=FunctionCall(name=tc["name"], arguments=tc["arguments"]),
-                )
-
-                try:
-                    result = self._exec_one(tool_call_obj)
-                except ToolExecutionBlocked as exc:
-                    result = f"工具调用被拒绝: {exc}"
-                    yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-                    yield StreamEvent("done", {"reason": "blocked"})
-                    return
-
-                yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
-                self._append_message(Message(role="tool", content=result, tool_call_id=tc["id"]))
+            tool_done_reason = yield from self._execute_tool_calls(tool_calls_data)
+            if tool_done_reason:
+                yield StreamEvent("done", {"reason": tool_done_reason})
+                return
 
         yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
         yield StreamEvent("done", {"reason": "max_turns"})
@@ -224,6 +218,86 @@ class AgentLoop:
             return self.name
         return f"{self.name} [{_preview(self._current_step_label, TOOL_ACTION_PREVIEW_CHARS)}]"
 
+    def _execute_tool_calls(self, tool_calls_data: list[dict]):
+        pending_reads: list[dict] = []
+        for tc in tool_calls_data:
+            if self.cancel.is_set():
+                yield from _cancel_events()
+                return "cancelled"
+
+            if _is_parallel_read_tool(tc["name"]):
+                pending_reads.append(tc)
+                continue
+
+            done_reason = yield from self._flush_parallel_read_calls(pending_reads)
+            pending_reads = []
+            if done_reason:
+                return done_reason
+
+            done_reason = yield from self._execute_serial_tool_call(tc)
+            if done_reason:
+                return done_reason
+
+        return (yield from self._flush_parallel_read_calls(pending_reads))
+
+    def _flush_parallel_read_calls(self, tool_calls_data: list[dict]):
+        if not tool_calls_data:
+            return None
+
+        from llm.client import StreamEvent
+
+        for tc in tool_calls_data:
+            if self.cancel.is_set():
+                yield from _cancel_events()
+                return "cancelled"
+            yield StreamEvent("tool_call_start", {"name": tc["name"], "args": tc["arguments"]})
+
+        result_cache: dict[int, str] = {}
+        blocked_indexes: set[int] = set()
+        worker_count = min(len(tool_calls_data), MAX_PARALLEL_TOOL_CALLS)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                index: executor.submit(self._exec_one, _tool_call_from_data(tc))
+                for index, tc in enumerate(tool_calls_data)
+            }
+            for index, future in futures.items():
+                try:
+                    result_cache[index] = future.result()
+                except ToolExecutionBlocked as exc:
+                    result_cache[index] = f"工具调用被拒绝: {exc}"
+                    blocked_indexes.add(index)
+
+        for index, tc in enumerate(tool_calls_data):
+            result = result_cache[index]
+            yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+            if index not in blocked_indexes:
+                self._append_message(Message(role="tool", content=result, tool_call_id=tc["id"]))
+
+        if blocked_indexes:
+            return "blocked"
+        return None
+
+    def _execute_serial_tool_call(self, tc: dict):
+        from llm.client import StreamEvent
+
+        if self.cancel.is_set():
+            yield from _cancel_events()
+            return "cancelled"
+
+        yield StreamEvent("tool_call_start", {"name": tc["name"], "args": tc["arguments"]})
+        tool_call_obj = _tool_call_from_data(tc)
+
+        try:
+            result = self._exec_one(tool_call_obj)
+        except ToolExecutionBlocked as exc:
+            result = f"工具调用被拒绝: {exc}"
+            yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+            return "blocked"
+
+        yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
+        self._append_message(Message(role="tool", content=result, tool_call_id=tc["id"]))
+        return None
+
     def _exec_one(self, tool_call) -> str:
         try:
             args = json.loads(tool_call.function.arguments)
@@ -256,6 +330,24 @@ def _record_usage(budget: AgentBudget, usage: dict | None) -> None:
     details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
     cached = int(details.get("cached_tokens") or usage.get("cached_input_tokens") or 0)
     budget.record_tokens(input_tokens, output_tokens, cached=cached)
+
+
+def _tool_call_from_data(tc: dict) -> ToolCall:
+    return ToolCall(
+        id=tc["id"],
+        type="function",
+        function=FunctionCall(name=tc["name"], arguments=tc["arguments"]),
+    )
+
+
+def _is_parallel_read_tool(name: str) -> bool:
+    return TOOL_EFFECTS.get(name, "write") == "read"
+
+
+def _cancel_events():
+    from llm.client import StreamEvent
+
+    yield StreamEvent("content", "\n⏹️ 用户取消")
 
 
 def _budget_exit_events(agent_name: str, budget: AgentBudget, reason: ExitReason):

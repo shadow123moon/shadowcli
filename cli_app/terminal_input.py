@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 
-SlashCommand = tuple[str, str]
 T = TypeVar("T")
-
 
 @dataclass(frozen=True)
 class SelectOption(Generic[T]):
@@ -17,89 +15,70 @@ class SelectOption(Generic[T]):
     description: str = ""
 
 
-SLASH_COMMANDS: tuple[SlashCommand, ...] = (
-    ("/help", "显示帮助"),
-    ("/tools", "列出已注册工具"),
-    ("/plan", "单 Agent 计划执行"),
-    ("/memory", "显示长期记忆状态"),
-    ("/new", "开启新对话"),
-    ("/resume", "选择并恢复历史对话"),
-    ("/remember", "写入一条长期记忆"),
-    ("/tree", "显示当前对话树"),
-    ("/jump", "跳转到旧消息节点"),
-    ("/compact", "压缩当前会话分支"),
-    ("/quit", "退出"),
-)
-
-
 def build_prompt() -> Callable[[], str]:
-    """Return the best available terminal prompt function."""
-    if not _can_use_prompt_toolkit():
-        return lambda: input("\n> ")
+    """Return the standard REPL prompt function."""
+    if _can_use_prompt_toolkit():
+        try:
+            return _build_prompt_toolkit_paste_prompt()
+        except ImportError:
+            pass
+    return _build_plain_prompt()
 
-    try:
-        from prompt_toolkit.completion import Completer, Completion
-        from prompt_toolkit import PromptSession
-        from prompt_toolkit.filters import Condition
-        from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.shortcuts import CompleteStyle
-        from prompt_toolkit.styles import Style
-    except ImportError:
-        return lambda: input("\n> ")
+
+def _build_plain_prompt() -> Callable[[], str]:
+    return lambda: input("\n> ")
+
+
+def _build_prompt_toolkit_paste_prompt() -> Callable[[], str]:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
 
     key_bindings = KeyBindings()
+    paste_index = 0
+    pasted_texts: dict[str, str] = {}
 
-    class SlashCommandCompleter(Completer):
-        def get_completions(self, document, complete_event):
-            _ = complete_event
-            text = document.text_before_cursor
-            for command, description in _current_matches(text):
-                yield Completion(
-                    command,
-                    start_position=-len(text),
-                    display=command,
-                    display_meta=description,
-                )
-
-    @Condition
-    def slash_completion_open() -> bool:
-        from prompt_toolkit.application import get_app
-
-        return bool(_current_matches(get_app().current_buffer.text))
-
-    @key_bindings.add("enter", filter=slash_completion_open)
+    @key_bindings.add(Keys.BracketedPaste)
     def _(event) -> None:
-        completion_state = event.current_buffer.complete_state
-        completion = completion_state.current_completion if completion_state is not None else None
-        if completion is not None:
-            event.current_buffer.apply_completion(completion)
-        else:
-            matches = _current_matches(event.current_buffer.text)
-            if matches:
-                command, _ = matches[0]
-                event.current_buffer.text = command
-                event.current_buffer.cursor_position = len(command)
-        event.current_buffer.validate_and_handle()
+        nonlocal paste_index
+        text = _normalize_paste_text(event.data)
+        if "\n" not in text:
+            event.current_buffer.insert_text(text)
+            return
+        paste_index += 1
+        placeholder = _paste_placeholder(paste_index, text)
+        pasted_texts[placeholder] = text
+        event.current_buffer.insert_text(placeholder)
 
-    style = Style.from_dict({
-        "completion-menu.completion": "bg:#0d2538 #8ca4aa",
-        "completion-menu.completion.current": "bg:#1a3a4f #c586c0 bold",
-        "completion-menu.meta.completion": "bg:#0d2538 #6f878d",
-        "completion-menu.meta.completion.current": "bg:#1a3a4f #c586c0",
-    })
-
-    session = PromptSession(
-        completer=SlashCommandCompleter(),
-        complete_while_typing=True,
-        complete_style=CompleteStyle.COLUMN,
-        key_bindings=key_bindings,
-        style=style,
-    )
+    session = PromptSession(key_bindings=key_bindings, multiline=False)
 
     def prompt() -> str:
-        return session.prompt("\n> ")
+        nonlocal paste_index, pasted_texts
+        paste_index = 0
+        pasted_texts = {}
+        line = session.prompt("\n> ")
+        return _expand_paste_placeholders(line, pasted_texts)
 
     return prompt
+
+
+def _normalize_paste_text(text: str) -> str:
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _paste_placeholder(index: int, text: str) -> str:
+    return f"[Pasted text #{index} +{_paste_line_count(text)} lines]"
+
+
+def _paste_line_count(text: str) -> int:
+    lines = text.splitlines()
+    return max(1, len(lines))
+
+
+def _expand_paste_placeholders(line: str, pasted_texts: dict[str, str]) -> str:
+    for placeholder, text in pasted_texts.items():
+        line = line.replace(placeholder, text)
+    return line
 
 
 def select_from_menu(
@@ -193,7 +172,7 @@ def select_from_menu(
         layout=Layout(window),
         key_bindings=key_bindings,
         full_screen=False,
-        erase_when_done=False,
+        erase_when_done=True,
         mouse_support=False,
         style=style,
     )
@@ -201,26 +180,6 @@ def select_from_menu(
         return app.run()
     except (EOFError, KeyboardInterrupt):
         return None
-
-
-def _should_show_menu(text: str) -> bool:
-    if not text.startswith("/"):
-        return False
-    if "\n" in text:
-        return False
-    return " " not in text
-
-
-def _current_matches(text: str) -> list[SlashCommand]:
-    if not _should_show_menu(text):
-        return []
-    return list(_matching_commands(text, SLASH_COMMANDS))
-
-
-def _matching_commands(prefix: str, commands: Iterable[SlashCommand]) -> Iterable[SlashCommand]:
-    for command, description in commands:
-        if command.startswith(prefix):
-            yield command, description
 
 
 def _can_use_prompt_toolkit() -> bool:
