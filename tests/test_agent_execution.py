@@ -18,6 +18,7 @@ from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
+from skills import SkillRegistry
 from tooling import (
     BashTool,
     EditTool,
@@ -72,6 +73,89 @@ class ModuleLayoutTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
 
         self.assertEqual(list((root / "memory_pythonic").glob("*.py")), [])
+
+
+class SkillRegistryTests(unittest.TestCase):
+    def test_scan_discovers_skill_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes for bugs and risky behavior.",
+                    "disable-model-invocation: true",
+                    "argument-hint: [scope]",
+                    "---",
+                    "",
+                    "Review the current diff and report concrete risks.",
+                ]),
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry(root)
+
+            skills = registry.list()
+
+        self.assertEqual(len(skills), 1)
+        skill = skills[0]
+        self.assertEqual(skill.name, "code-review")
+        self.assertEqual(skill.directory_name, "code-review")
+        self.assertEqual(skill.description, "Review code changes for bugs and risky behavior.")
+        self.assertTrue(skill.disable_model_invocation)
+        self.assertEqual(skill.argument_hint, "[scope]")
+        self.assertEqual(skill.path.name, "SKILL.md")
+
+    def test_load_returns_skill_body_without_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "explain-code"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: explain-code",
+                    "description: Explain code in plain language.",
+                    "---",
+                    "",
+                    "Explain `$ARGUMENTS` using a process-first mental model.",
+                ]),
+                encoding="utf-8",
+            )
+
+            loaded = SkillRegistry(root).load("explain-code")
+
+        self.assertEqual(loaded.definition.name, "explain-code")
+        self.assertIn("name: explain-code", loaded.raw_content)
+        self.assertEqual(
+            loaded.body.strip(),
+            "Explain `$ARGUMENTS` using a process-first mental model.",
+        )
+
+    def test_find_accepts_directory_name_as_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes.",
+                    "---",
+                    "",
+                    "Review the current changes.",
+                ]),
+                encoding="utf-8",
+            )
+
+            registry = SkillRegistry(root)
+
+            self.assertEqual(registry.find("code-review").path, skill_dir / "SKILL.md")
+            self.assertEqual(registry.find("review").path, skill_dir / "SKILL.md")
+            self.assertIsNone(registry.find("missing"))
 
 
 class ReactAgentTests(unittest.TestCase):
