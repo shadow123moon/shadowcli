@@ -9,7 +9,7 @@ from agent import ReactAgent
 from llm import chat as default_chat
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
 from sessions.types import DEFAULT_SESSION_TITLE
-from skills import SkillRegistry
+from skills import SkillContextBuilder, SkillRegistry
 from .commands import (
     entry_label,
     entry_preview,
@@ -23,6 +23,7 @@ from .commands import (
     parse_plan_command,
     parse_remember_command,
     parse_resume_command,
+    parse_skill_command,
     parse_skills_command,
     parse_tree_command,
 )
@@ -136,6 +137,10 @@ class ReplRouter:
             return True
         if parse_skills_command(line):
             self.renderer.message(format_skill_list(self.skill_registry.list()))
+            return True
+        skill_input = parse_skill_command(line)
+        if skill_input is not None:
+            self._handle_skill(*skill_input)
             return True
         if line == MEMORY_COMMAND:
             self.renderer.message(format_memory_status(self.long_term))
@@ -254,6 +259,36 @@ class ReplRouter:
             self.renderer.message("用法: /plan <任务>")
             return
         self._run_agent_line(line)
+
+    def _handle_skill(self, name: str, task: str) -> None:
+        if not name or not task:
+            self.renderer.message("用法: /skill <name> <任务>")
+            return
+        try:
+            loaded_skill = self.skill_registry.load(name)
+        except KeyError:
+            self.renderer.message(f"未找到 skill: {name}")
+            return
+
+        active_session, active_agent, context_builder = self.ensure_session()
+        self.runtime_context_builder = maybe_compact_before_run(
+            active_session,
+            active_agent,
+            self.long_term,
+            context_builder,
+            self.renderer,
+            chat_fn=self.chat_fn,
+        )
+        self.run_agent_once(
+            active_agent,
+            task,
+            runtime_context_builder=SkillContextBuilder(
+                base=self.runtime_context_builder,
+                skill=loaded_skill,
+                arguments=task,
+            ),
+            renderer=self.renderer,
+        )
 
     def _run_agent_line(self, line: str) -> None:
         active_session, active_agent, context_builder = self.ensure_session()

@@ -20,10 +20,12 @@ python -m cli_app
 /tree               查看最近会话节点
 /jump <entry_id>    跳转到旧消息
 /tools              查看已注册工具
+/skills             列出可用 skills
+/skill <name> <任务> 使用指定 skill 执行任务
 /quit               退出
 ```
 
-`main.py`、`core.py`、`cli.py` 不再作为入口。后续新增能力优先接到 `cli_app/` 的命令路由和 `ToolRuntime`。
+`main.py`、`core.py`、`cli.py` 不再作为入口。后续新增能力优先接到 `cli_app/` 的命令路由；工具执行期扩展接 `ToolRuntime`，workflow/skill 类上下文能力接 `skills/`。
 
 ## 执行链路
 
@@ -48,6 +50,32 @@ cli_app /plan
   -> ToolRegistry.execute(name, args)
 ```
 
+Skill 初始化：
+
+```text
+cli_app 启动
+  -> PluginManager.skill_roots()
+  -> SkillRegistry(extra_roots=...)
+```
+
+Skill 命令：
+
+```text
+cli_app /skill <name> <任务>
+  -> SkillRegistry.load(name)
+  -> SkillContextBuilder
+  -> ReactAgent
+```
+
+插件 skill 贡献：
+
+```text
+plugins/<id>/plugin.json
+  -> PluginManager 校验 manifest
+  -> SkillRoot(source="plugin:<id>", path=...)
+  -> SkillRegistry 读取 SKILL.md
+```
+
 关键约束：Agent 不直接 `tool.execute(...)`，统一走 `registry.execute(...)`。Agent 只产生事件，`cli_app/runner.py` 把事件路由给 `ui/terminal.py` 渲染，并把消息事实写入 session。
 
 ## 模块职责
@@ -58,6 +86,8 @@ cli_app /plan
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
 | `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
+| `plugin_runtime/` | 读取 `plugins/*/plugin.json`，当前只加载 manifest 声明的 skill contributions |
+| `skills/` | 发现、加载并格式化 `SKILL.md` 上下文 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
 | `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
 | `extensions/approval_policy.py` | 工具风险判断 |
@@ -235,6 +265,7 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
 | HITL | 已接入，合并到 `ToolRegistry` |
 | Session/长期记忆 | 已接入，session 实时记录会话树，长期记忆写入 `long_term.md` |
+| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `plugin.json` manifest 声明 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
 | Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
 | 测试 | 主线 import / HITL / session 树测试可单独验证 |

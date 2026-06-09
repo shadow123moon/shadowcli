@@ -21,14 +21,15 @@ D:\paicli-main\paicli-main\           ← Java 源码
 ├── AGENTS.md  README.md  ROADMAP.md  ← 权威设计文档,看模块设计时优先读
 ```
 
-## Python 项目状态(2026-05-30)
+## Python 项目状态(2026-06-09)
 
 | 参考期 | Java 包 | Python 模块 | 状态 |
 |---|---|---|---|
 | 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `tooling/` `llm/` | 主路径已接入,持续维护 |
 | 3 | `memory/` | `sessions/long_term.py` (`long_term.md` 文本事实清单) | 已瘦身为项目级 markdown 记忆 |
 | 4 | `rag/` | — | 已放弃；本地项目检索改用 read/grep/find/ls |
-| 6+ | tui / mcp / lsp / snapshot / hitl / runtime / skill | 未开始 | — |
+| 6+ | hitl / runtime / skill | `extensions/tool_runtime.py` `plugin_runtime/` `skills/` `cli_app/` | HITL 与工具运行时已接入；skill 命令化和插件 manifest 入口已接入 |
+| 6+ | tui / mcp / lsp / snapshot | — | 未接入主路径 |
 
 ## 运行 / 测试
 

@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from skills import SkillRoot
+
+
+PLUGIN_MANIFEST = "plugin.json"
+
+
+@dataclass(frozen=True)
+class PluginDiagnostic:
+    plugin_path: Path
+    message: str
+
+
+@dataclass(frozen=True)
+class PluginSkillContribution:
+    path: str
+
+
+@dataclass(frozen=True)
+class PluginManifest:
+    id: str
+    name: str
+    version: str
+    description: str
+    skills: list[PluginSkillContribution]
+
+
+@dataclass(frozen=True)
+class LoadedPlugin:
+    root: Path
+    manifest: PluginManifest
+    skill_roots: list[SkillRoot]
+
+
+def read_plugin_manifest(plugin_root: Path) -> tuple[PluginManifest | None, list[PluginDiagnostic]]:
+    manifest_path = plugin_root / PLUGIN_MANIFEST
+    try:
+        raw = manifest_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception as exc:
+        return None, [_diagnostic(plugin_root, f"failed to read plugin.json: {exc}")]
+
+    if not isinstance(data, dict):
+        return None, [_diagnostic(plugin_root, "plugin.json must contain a JSON object")]
+
+    diagnostics: list[PluginDiagnostic] = []
+    plugin_id = _required_string(data, "id", plugin_root, diagnostics)
+    if plugin_id is None:
+        return None, diagnostics
+    if plugin_id != plugin_root.name:
+        diagnostics.append(_diagnostic(
+            plugin_root,
+            f"id must match directory name: expected {plugin_root.name!r}, got {plugin_id!r}",
+        ))
+        return None, diagnostics
+    name = _required_string(data, "name", plugin_root, diagnostics)
+    version = _required_string(data, "version", plugin_root, diagnostics)
+    if name is None or version is None:
+        return None, diagnostics
+
+    manifest = PluginManifest(
+        id=plugin_id,
+        name=name,
+        version=version,
+        description=_optional_string(data, "description", "", plugin_root, diagnostics),
+        skills=_read_skill_contributions(data.get("skills", []), plugin_root, diagnostics),
+    )
+    return manifest, diagnostics
+
+
+def _read_skill_contributions(
+    raw_skills: Any,
+    plugin_root: Path,
+    diagnostics: list[PluginDiagnostic],
+) -> list[PluginSkillContribution]:
+    if raw_skills is None:
+        return []
+    if not isinstance(raw_skills, list):
+        diagnostics.append(_diagnostic(plugin_root, "skills must be a list"))
+        return []
+
+    skills = []
+    for index, item in enumerate(raw_skills):
+        if not isinstance(item, dict):
+            diagnostics.append(_diagnostic(plugin_root, f"skills[{index}] must be an object"))
+            continue
+        path = item.get("path")
+        if not isinstance(path, str) or not path.strip():
+            diagnostics.append(_diagnostic(plugin_root, f"skills[{index}].path must be a non-empty string"))
+            continue
+        skills.append(PluginSkillContribution(path=path.strip()))
+    return skills
+
+
+def _required_string(
+    data: dict[str, Any],
+    key: str,
+    plugin_root: Path,
+    diagnostics: list[PluginDiagnostic],
+) -> str | None:
+    value = data.get(key)
+    if not isinstance(value, str) or not value.strip():
+        diagnostics.append(_diagnostic(plugin_root, f"{key} must be a non-empty string"))
+        return None
+    return value.strip()
+
+
+def _optional_string(
+    data: dict[str, Any],
+    key: str,
+    default: str,
+    plugin_root: Path,
+    diagnostics: list[PluginDiagnostic],
+) -> str:
+    value = data.get(key, default)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        diagnostics.append(_diagnostic(plugin_root, f"{key} must be a string"))
+        return default
+    return value.strip()
+
+
+def _diagnostic(plugin_root: Path, message: str) -> PluginDiagnostic:
+    return PluginDiagnostic(plugin_path=plugin_root, message=message)

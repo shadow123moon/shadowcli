@@ -11,6 +11,7 @@ from .constants import (
     PLAN_COMMAND,
     REMEMBER_COMMAND,
     RESUME_COMMAND,
+    SKILL_COMMAND,
     SKILLS_COMMAND,
     TREE_COMMAND,
 )
@@ -30,6 +31,20 @@ def parse_plan_command(user_input: str) -> str | None:
 
 def parse_skills_command(user_input: str) -> bool:
     return user_input.strip() == SKILLS_COMMAND
+
+
+def parse_skill_command(user_input: str) -> tuple[str, str] | None:
+    stripped = user_input.strip()
+    if stripped == SKILL_COMMAND:
+        return "", ""
+    if not stripped.startswith(f"{SKILL_COMMAND} "):
+        return None
+
+    remainder = stripped[len(SKILL_COMMAND):].strip()
+    if not remainder:
+        return "", ""
+    name, _, task = remainder.partition(" ")
+    return name.strip(), task.strip()
 
 
 def parse_remember_command(user_input: str) -> str | None:
@@ -97,9 +112,10 @@ def format_skill_list(skills: Sequence[SkillDefinition]) -> str:
 
     lines = [f"可用 skills（{len(skills)} 个）:"]
     for skill in skills:
+        source = f" [{skill.source}]" if skill.source else ""
         description = f": {skill.description}" if skill.description else ""
         hint = f"  {skill.argument_hint}" if skill.argument_hint else ""
-        lines.append(f"  - {skill.name}{description}{hint}")
+        lines.append(f"  - {skill.name}{source}{description}{hint}")
     return "\n".join(lines)
 
 

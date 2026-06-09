@@ -1,6 +1,7 @@
 import contextlib
 import inspect
 import io
+import json
 import logging
 import os
 import tempfile
@@ -18,7 +19,8 @@ from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
-from skills import SkillRegistry
+from skills import SkillRegistry, SkillRoot
+from plugin_runtime import PluginManager
 from tooling import (
     BashTool,
     EditTool,
@@ -95,7 +97,10 @@ class SkillRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            registry = SkillRegistry(root)
+            registry = SkillRegistry(
+                root,
+                roots=[SkillRoot(source="project", path=root / ".agents" / "skills")],
+            )
 
             skills = registry.list()
 
@@ -103,6 +108,7 @@ class SkillRegistryTests(unittest.TestCase):
         skill = skills[0]
         self.assertEqual(skill.name, "code-review")
         self.assertEqual(skill.directory_name, "code-review")
+        self.assertEqual(skill.source, "project")
         self.assertEqual(skill.description, "Review code changes for bugs and risky behavior.")
         self.assertTrue(skill.disable_model_invocation)
         self.assertEqual(skill.argument_hint, "[scope]")
@@ -125,7 +131,10 @@ class SkillRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            loaded = SkillRegistry(root).load("explain-code")
+            loaded = SkillRegistry(
+                root,
+                roots=[SkillRoot(source="project", path=root / ".agents" / "skills")],
+            ).load("explain-code")
 
         self.assertEqual(loaded.definition.name, "explain-code")
         self.assertIn("name: explain-code", loaded.raw_content)
@@ -151,11 +160,276 @@ class SkillRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            registry = SkillRegistry(root)
+            registry = SkillRegistry(
+                root,
+                roots=[SkillRoot(source="project", path=root / ".agents" / "skills")],
+            )
 
             self.assertEqual(registry.find("code-review").path, skill_dir / "SKILL.md")
             self.assertEqual(registry.find("review").path, skill_dir / "SKILL.md")
             self.assertIsNone(registry.find("missing"))
+
+    def test_default_roots_ignore_plugin_skill_dirs_without_manifest_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_skill = root / ".agents" / "skills" / "code-review"
+            plugin_skill = root / "plugins" / "superpowers" / "skills" / "brainstorming"
+            project_skill.mkdir(parents=True)
+            plugin_skill.mkdir(parents=True)
+            (project_skill / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes.",
+                    "---",
+                    "",
+                    "Review code.",
+                ]),
+                encoding="utf-8",
+            )
+            (plugin_skill / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: Explore requirements before implementation.",
+                    "---",
+                    "",
+                    "Ask one question at a time.",
+                ]),
+                encoding="utf-8",
+            )
+
+            skills = SkillRegistry(root).list()
+
+        self.assertTrue(any(skill.path == project_skill / "SKILL.md" for skill in skills))
+        self.assertFalse(any(skill.path == plugin_skill / "SKILL.md" for skill in skills))
+
+    def test_explicit_empty_roots_disable_all_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes.",
+                    "---",
+                    "",
+                    "Review code.",
+                ]),
+                encoding="utf-8",
+            )
+
+            skills = SkillRegistry(root, roots=[]).list()
+
+        self.assertEqual(skills, [])
+
+    def test_find_prefers_project_skill_when_names_collide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_skill = root / ".agents" / "skills" / "review"
+            plugin_skill = root / "plugins" / "superpowers" / "skills" / "review"
+            project_skill.mkdir(parents=True)
+            plugin_skill.mkdir(parents=True)
+            _write_plugin_manifest(root / "plugins" / "superpowers", plugin_id="superpowers")
+            for skill_dir, description in [
+                (project_skill, "Project review."),
+                (plugin_skill, "Plugin review."),
+            ]:
+                (skill_dir / "SKILL.md").write_text(
+                    "\n".join([
+                        "---",
+                        "name: review",
+                        f"description: {description}",
+                        "---",
+                        "",
+                        description,
+                    ]),
+                    encoding="utf-8",
+                )
+
+            skill = SkillRegistry(
+                root,
+                extra_roots=PluginManager(root).skill_roots(),
+            ).find("review")
+
+        self.assertEqual(skill.source, "project")
+        self.assertEqual(skill.description, "Project review.")
+
+    def test_registry_accepts_external_skill_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            external_root = Path(tmp) / "superpowers" / "skills"
+            skill_dir = external_root / "test-driven-development"
+            root.mkdir()
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: test-driven-development",
+                    "description: Write a failing test before implementation.",
+                    "---",
+                    "",
+                    "Use red-green-refactor.",
+                ]),
+                encoding="utf-8",
+            )
+
+            skills = SkillRegistry(
+                root,
+                extra_roots=[SkillRoot(source="superpowers", path=external_root)],
+            ).list()
+
+        self.assertEqual(skills[0].name, "test-driven-development")
+        self.assertEqual(skills[0].source, "superpowers")
+
+    def test_registry_accepts_labeled_skill_roots_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            external_root = Path(tmp) / "superpowers" / "skills"
+            skill_dir = external_root / "brainstorming"
+            root.mkdir()
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: Explore requirements before implementation.",
+                    "---",
+                    "",
+                    "Ask one question at a time.",
+                ]),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"PAICLI_SKILL_ROOTS": f"superpowers={external_root}"}):
+                skills = SkillRegistry(root).list()
+
+        matches = [skill for skill in skills if skill.name == "brainstorming"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].source, "superpowers")
+
+
+class PluginManagerTests(unittest.TestCase):
+    def test_manifest_declared_skill_root_is_listed_by_skills_command(self):
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            plugin_root = cwd / "plugins" / "superpowers"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            _write_plugin_manifest(plugin_root, plugin_id="superpowers")
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: Explore requirements before implementation.",
+                    "---",
+                    "",
+                    "Ask one question at a time.",
+                ]),
+                encoding="utf-8",
+            )
+            manager = PluginManager(cwd)
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=_FailingSessionStore(),
+                long_term=_StubLongTermMemory(),
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
+                skill_registry=SkillRegistry(cwd, extra_roots=manager.skill_roots()),
+            )
+
+            keep_running = repl_router.route("/skills")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(manager.diagnostics(), [])
+        self.assertTrue(any("brainstorming" in message for message in renderer.messages))
+        self.assertTrue(any("plugin:superpowers" in message for message in renderer.messages))
+
+    def test_plugin_dir_without_manifest_contributes_no_skill_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_skill = root / "plugins" / "random" / "skills" / "foo"
+            plugin_skill.mkdir(parents=True)
+            (plugin_skill / "SKILL.md").write_text("Do things.", encoding="utf-8")
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.diagnostics(), [])
+
+    def test_skill_path_must_be_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "broken"
+            _write_plugin_manifest(plugin_root, plugin_id="broken", skills=[{"path": 123}])
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertTrue(any("skills[0].path" in diagnostic.message for diagnostic in manager.diagnostics()))
+
+    def test_skill_path_cannot_escape_plugin_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "escape"
+            _write_plugin_manifest(plugin_root, plugin_id="escape", skills=[{"path": "../outside"}])
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertTrue(any("outside plugin root" in diagnostic.message for diagnostic in manager.diagnostics()))
+
+    def test_skill_path_must_point_to_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "file-skill"
+            _write_plugin_manifest(plugin_root, plugin_id="file-skill", skills=[{"path": "plugin.json"}])
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertTrue(any("must point to a directory" in diagnostic.message for diagnostic in manager.diagnostics()))
+
+    def test_manifest_requires_name_and_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "minimal"
+            plugin_root.mkdir(parents=True)
+            (plugin_root / "plugin.json").write_text(
+                json.dumps({
+                    "id": "minimal",
+                    "skills": [{"path": "skills"}],
+                }),
+                encoding="utf-8",
+            )
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            messages = [diagnostic.message for diagnostic in manager.diagnostics()]
+            self.assertTrue(any("name must be a non-empty string" in message for message in messages))
+            self.assertTrue(any("version must be a non-empty string" in message for message in messages))
+
+    def test_plugin_id_must_match_directory_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "actual-dir"
+            _write_plugin_manifest(plugin_root, plugin_id="manifest-id")
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertTrue(any("id must match directory name" in diagnostic.message for diagnostic in manager.diagnostics()))
 
 
 class ReactAgentTests(unittest.TestCase):
@@ -628,6 +902,12 @@ class AgentLoopTests(unittest.TestCase):
 
 class CliAgentTests(unittest.TestCase):
     def test_tree_and_jump_commands_are_parsed(self):
+        self.assertTrue(cli.parse_skills_command("/skills"))
+        self.assertFalse(cli.parse_skills_command("/skills now"))
+        self.assertEqual(cli.parse_skill_command("/skill"), ("", ""))
+        self.assertEqual(cli.parse_skill_command("/skill code-review"), ("code-review", ""))
+        self.assertEqual(cli.parse_skill_command("/skill code-review 检查当前改动"), ("code-review", "检查当前改动"))
+        self.assertIsNone(cli.parse_skill_command("/skillcode-review 检查当前改动"))
         self.assertTrue(cli.parse_tree_command("/tree"))
         self.assertFalse(cli.parse_tree_command("/tree now"))
         self.assertEqual(cli.parse_jump_command("/jump"), "")
@@ -731,6 +1011,140 @@ class CliAgentTests(unittest.TestCase):
             runner.repl(renderer=renderer)
 
         self.assertEqual(seen, [(runtime, [], True)])
+
+    def test_repl_skills_command_lists_available_skills_without_starting_session(self):
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            skill_dir = cwd / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes for bugs.",
+                    "---",
+                    "",
+                    "Review the current diff.",
+                ]),
+                encoding="utf-8",
+            )
+            session_store = _FailingSessionStore()
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=session_store,
+                long_term=_StubLongTermMemory(),
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
+            )
+
+            keep_running = repl_router.route("/skills")
+
+        self.assertTrue(keep_running)
+        self.assertTrue(any("code-review" in message for message in renderer.messages))
+        self.assertTrue(any("Review code changes for bugs." in message for message in renderer.messages))
+        self.assertTrue(any("project" in message for message in renderer.messages))
+
+    def test_repl_skill_command_loads_skill_context_and_runs_task(self):
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            skill_dir = cwd / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes for bugs.",
+                    "argument-hint: [scope]",
+                    "---",
+                    "",
+                    "Review `$ARGUMENTS` and report concrete risks.",
+                ]),
+                encoding="utf-8",
+            )
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+            )
+
+            keep_running = repl_router.route("/skill code-review 检查当前改动")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(agent.inputs[0][0], "检查当前改动")
+        context = agent.inputs[0][1]
+        self.assertIn("## 当前 Skill", context)
+        self.assertIn("code-review", context)
+        self.assertIn("Review `检查当前改动` and report concrete risks.", context)
+        self.assertNotIn("$ARGUMENTS", context)
+
+    def test_repl_skill_command_reports_missing_skill_without_running_agent(self):
+        import cli_app.router as router
+
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repl_router = router.ReplRouter(
+                runtime=ToolRuntime(ToolRegistry()),
+                cwd=Path(tmp),
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+            )
+
+            keep_running = repl_router.route("/skill missing 做点事")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(agent.inputs, [])
+        self.assertTrue(any("未找到 skill: missing" in message for message in renderer.messages))
+
+    def test_runner_skill_registry_loads_manifest_declared_plugin_skills(self):
+        import cli_app.runner as runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            plugin_root = cwd / "plugins" / "superpowers"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            _write_plugin_manifest(plugin_root, plugin_id="superpowers")
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: Explore requirements before implementation.",
+                    "---",
+                    "",
+                    "Ask one question at a time.",
+                ]),
+                encoding="utf-8",
+            )
+
+            registry = runner.build_skill_registry(cwd)
+            skill = registry.find("brainstorming")
+
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.source, "plugin:superpowers")
 
     def test_repl_tree_command_prints_session_tree(self):
         runtime = ToolRuntime(ToolRegistry())
@@ -1215,6 +1629,17 @@ class _StubSessionStore:
         return Path("agent_memory")
 
 
+class _FailingSessionStore:
+    def open_recent(self, cwd):
+        raise AssertionError("/skills 不应打开历史会话")
+
+    def create(self, cwd):
+        raise AssertionError("/skills 不应创建会话")
+
+    def project_dir(self, cwd):
+        return Path("agent_memory")
+
+
 class _FixedSessionStore:
     def __init__(self, session, project_dir):
         self.session = session
@@ -1238,6 +1663,18 @@ def _branching_session(tmp: Path):
     target = session.append_message(Message(role="assistant", content="fork"))
     old_leaf = session.append_message(Message(role="user", content="旧分支问题"))
     return session, target.id, old_leaf.id
+
+
+def _write_plugin_manifest(plugin_root: Path, *, plugin_id: str, skills=None) -> None:
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "1.0.0",
+        "description": "Test plugin",
+        "skills": [{"path": "skills"}] if skills is None else skills,
+    }
+    (plugin_root / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _stream_content(calls, content):

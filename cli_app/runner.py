@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from agent import ReactAgent
 from llm import chat
 from mcp_integration import load_mcp_config, McpServerManager, McpToolWrapper
+from plugin_runtime import PluginManager
 from sessions import RuntimeContextBuilder, SessionStore
 from sessions.summarizer import generate_branch_summary
 from skills import SkillRegistry
@@ -25,6 +26,14 @@ from .terminal_input import build_prompt
 from ui import Renderer, TerminalRenderer
 
 log = logging.getLogger(__name__)
+
+
+def build_skill_registry(cwd: Path | str) -> SkillRegistry:
+    plugin_manager = PluginManager(cwd)
+    skill_roots = plugin_manager.skill_roots()
+    for diagnostic in plugin_manager.diagnostics():
+        log.warning("[插件] %s: %s", diagnostic.plugin_path, diagnostic.message)
+    return SkillRegistry(cwd, extra_roots=skill_roots)
 
 
 def run_once(
@@ -92,7 +101,7 @@ def repl(renderer: Renderer | None = None) -> int:
     cwd = Path.cwd()
     session_store = SessionStore()
     long_term = build_long_term_memory(session_store.project_dir(cwd) / "long_term.md")
-    skill_registry = SkillRegistry(cwd)
+    skill_registry = build_skill_registry(cwd)
 
     mcp_manager = McpServerManager()
     try:
