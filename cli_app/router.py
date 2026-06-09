@@ -9,11 +9,13 @@ from agent import ReactAgent
 from llm import chat as default_chat
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
 from sessions.types import DEFAULT_SESSION_TITLE
+from skills import SkillRegistry
 from .commands import (
     entry_label,
     entry_preview,
     format_compaction_result,
     format_memory_status,
+    format_skill_list,
     handle_remember,
     parse_compact_command,
     parse_jump_command,
@@ -21,6 +23,7 @@ from .commands import (
     parse_plan_command,
     parse_remember_command,
     parse_resume_command,
+    parse_skills_command,
     parse_tree_command,
 )
 from .constants import HELP, MEMORY_COMMAND
@@ -99,6 +102,7 @@ class ReplRouter:
         build_agent: Callable[..., ReactAgent],
         run_agent_once: Callable[..., None],
         list_tools: Callable[[Any], str] = default_list_tools,
+        skill_registry: SkillRegistry | None = None,
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
     ) -> None:
@@ -110,6 +114,7 @@ class ReplRouter:
         self.build_agent = build_agent
         self.run_agent_once = run_agent_once
         self.list_tools = list_tools
+        self.skill_registry = skill_registry or SkillRegistry(cwd)
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
 
@@ -128,6 +133,9 @@ class ReplRouter:
             return True
         if line == "/tools":
             self.renderer.message(self.list_tools(self.runtime))
+            return True
+        if parse_skills_command(line):
+            self.renderer.message(format_skill_list(self.skill_registry.list()))
             return True
         if line == MEMORY_COMMAND:
             self.renderer.message(format_memory_status(self.long_term))

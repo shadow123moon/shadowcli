@@ -1,4 +1,7 @@
+from collections.abc import Sequence
+
 from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager, TextLongTermMemory
+from skills import SkillDefinition
 
 from .constants import (
     COMPACT_COMMAND,
@@ -8,6 +11,7 @@ from .constants import (
     PLAN_COMMAND,
     REMEMBER_COMMAND,
     RESUME_COMMAND,
+    SKILLS_COMMAND,
     TREE_COMMAND,
 )
 
@@ -22,6 +26,10 @@ def parse_plan_command(user_input: str) -> str | None:
     if stripped.startswith(f"{PLAN_COMMAND} "):
         return stripped[len(PLAN_COMMAND):].strip()
     return None
+
+
+def parse_skills_command(user_input: str) -> bool:
+    return user_input.strip() == SKILLS_COMMAND
 
 
 def parse_remember_command(user_input: str) -> str | None:
@@ -81,6 +89,18 @@ def format_memory_status(memory: TextLongTermMemory) -> str:
         f"long_term : {len(memory)} facts",
         f"storage   : {memory.storage_path}",
     ])
+
+
+def format_skill_list(skills: Sequence[SkillDefinition]) -> str:
+    if not skills:
+        return "没有可用 skill。"
+
+    lines = [f"可用 skills（{len(skills)} 个）:"]
+    for skill in skills:
+        description = f": {skill.description}" if skill.description else ""
+        hint = f"  {skill.argument_hint}" if skill.argument_hint else ""
+        lines.append(f"  - {skill.name}{description}{hint}")
+    return "\n".join(lines)
 
 
 def format_session_tree(session: SessionManager, *, limit: int = 20) -> str:

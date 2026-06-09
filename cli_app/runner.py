@@ -10,6 +10,7 @@ from llm import chat
 from mcp_integration import load_mcp_config, McpServerManager, McpToolWrapper
 from sessions import RuntimeContextBuilder, SessionStore
 from sessions.summarizer import generate_branch_summary
+from skills import SkillRegistry
 from .commands import parse_plan_command
 from .constants import BANNER
 from .factories import build_agent, build_long_term_memory, build_registry, list_tools
@@ -91,6 +92,7 @@ def repl(renderer: Renderer | None = None) -> int:
     cwd = Path.cwd()
     session_store = SessionStore()
     long_term = build_long_term_memory(session_store.project_dir(cwd) / "long_term.md")
+    skill_registry = SkillRegistry(cwd)
 
     mcp_manager = McpServerManager()
     try:
@@ -106,6 +108,7 @@ def repl(renderer: Renderer | None = None) -> int:
             build_agent=build_agent,
             run_agent_once=run_once,
             list_tools=list_tools,
+            skill_registry=skill_registry,
             chat_fn=chat,
             build_branch_summary=generate_branch_summary,
         )
