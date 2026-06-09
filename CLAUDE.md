@@ -31,6 +31,19 @@ D:\paicli-main\paicli-main\           ← Java 源码
 | 6+ | hitl / runtime / skill | `extensions/tool_runtime.py` `plugin_runtime/` `skills/` `cli_app/` | HITL 与工具运行时已接入；skill 命令化和插件 manifest 入口已接入 |
 | 6+ | tui / mcp / lsp / snapshot | — | 未接入主路径 |
 
+## 近期演进顺序
+
+当前 plugin/runtime 方向按小阶段推进：
+
+```text
+阶段 3: plugin manifest -> skill contributions，已完成并接入主入口
+阶段 4: 插件启用/禁用/状态管理，下一步
+阶段 5: hooks / MCP server / runtime extension contributions
+阶段 6: 从命令化 skill 升级到可解释的隐式 skill 选择
+```
+
+阶段 4 的边界：先做 `/plugins`、`/plugin enable <id>`、`/plugin disable <id>` 和项目级启用状态存储；不在这一阶段实现 hooks、MCP server、runtime extension 或自动 skill 匹配。
+
 ## 运行 / 测试
 
 ```bash
