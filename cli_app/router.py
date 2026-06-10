@@ -10,7 +10,14 @@ from llm import chat as default_chat
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
 from sessions.types import DEFAULT_SESSION_TITLE
 from plugin_runtime import PluginManager, PluginStateStore
-from skills import SkillContextBuilder, SkillRegistry
+from skills import (
+    SkillContextBuilder,
+    SkillRegistry,
+    SkillSelection,
+    SkillSelector,
+    auto_skills_enabled,
+    skill_reference,
+)
 from .commands import (
     entry_label,
     entry_preview,
@@ -110,6 +117,7 @@ class ReplRouter:
         list_tools: Callable[[Any], str] = default_list_tools,
         skill_registry: SkillRegistry | None = None,
         skill_registry_builder: Callable[[Path], SkillRegistry] | None = None,
+        skill_selector: SkillSelector | None = None,
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
     ) -> None:
@@ -123,6 +131,7 @@ class ReplRouter:
         self.list_tools = list_tools
         self.skill_registry_builder = skill_registry_builder or (lambda path: SkillRegistry(path))
         self.skill_registry = skill_registry or self.skill_registry_builder(cwd)
+        self.skill_selector = skill_selector
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
 
@@ -330,6 +339,7 @@ class ReplRouter:
         )
 
     def _run_agent_line(self, line: str) -> None:
+        selection = self._select_auto_skill(line)
         active_session, active_agent, context_builder = self.ensure_session()
         self.runtime_context_builder = maybe_compact_before_run(
             active_session,
@@ -339,12 +349,31 @@ class ReplRouter:
             self.renderer,
             chat_fn=self.chat_fn,
         )
+        run_context_builder: RuntimeContextBuilder | SkillContextBuilder = self.runtime_context_builder
+        if selection is not None and selection.skill is not None:
+            loaded_skill = self.skill_registry.load_definition(selection.skill)
+            self.renderer.message(_format_auto_skill_selection(selection))
+            run_context_builder = SkillContextBuilder(
+                base=self.runtime_context_builder,
+                skill=loaded_skill,
+                arguments=line,
+            )
         self.run_agent_once(
             active_agent,
             line,
-            runtime_context_builder=self.runtime_context_builder,
+            runtime_context_builder=run_context_builder,
             renderer=self.renderer,
         )
+
+    def _select_auto_skill(self, line: str) -> SkillSelection | None:
+        if not auto_skills_enabled():
+            return None
+
+        selector = self.skill_selector or SkillSelector(self.skill_registry, chat_fn=self.chat_fn)
+        selection = selector.select(line)
+        if selection is None or selection.skill is None:
+            return None
+        return selection
 
     def _navigate_to(self, target_id: str) -> None:
         assert self.session is not None
@@ -498,3 +527,12 @@ def _format_loaded_session_summary(session: SessionManager) -> str:
 
 def _no_active_session_message() -> str:
     return "当前还没有对话。输入第一句话开始新对话，或输入 /resume 恢复历史对话。"
+
+
+def _format_auto_skill_selection(selection: SkillSelection) -> str:
+    assert selection.skill is not None
+    reason = selection.reason.strip() or "selector matched the user input"
+    return "\n".join([
+        f"自动加载 skill: {skill_reference(selection.skill)}",
+        f"原因: {reason}",
+    ])

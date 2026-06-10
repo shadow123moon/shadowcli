@@ -19,7 +19,7 @@ from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
-from skills import SkillDefinition, SkillRegistry, SkillRoot
+from skills import SkillDefinition, SkillRegistry, SkillRoot, SkillSelection, SkillSelector
 from plugin_runtime import PluginManager, PluginStateStore
 from tooling import (
     BashTool,
@@ -1474,6 +1474,176 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(agent.inputs, [])
         self.assertTrue(any("未找到 skill: missing" in message for message in renderer.messages))
 
+    def test_skill_selector_selects_plugin_skill_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            plugin_root = cwd / "plugins" / "superpowers"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            PluginStateStore(cwd).enable("superpowers")
+            _write_skill_file(
+                skill_dir,
+                name="brainstorming",
+                description="Explore requirements before implementation.",
+                body="SECRET BODY SHOULD NOT BE SENT TO SELECTOR.",
+                argument_hint="[feature idea]",
+            )
+            manager = PluginManager(cwd)
+            prompts = []
+
+            def fake_chat(messages, tools=None):
+                prompts.extend(message.content or "" for message in messages)
+                return ChatResponse(content='{"skill": "superpowers:brainstorming", "reason": "需要先澄清新功能"}')
+
+            selection = SkillSelector(
+                SkillRegistry(cwd, extra_roots=manager.skill_roots()),
+                chat_fn=fake_chat,
+            ).select("我要加一个新功能")
+
+        prompt = "\n".join(prompts)
+        self.assertIsNotNone(selection.skill)
+        self.assertEqual(selection.skill.source, "plugin:superpowers")
+        self.assertEqual(selection.reason, "需要先澄清新功能")
+        self.assertIn("superpowers:brainstorming", prompt)
+        self.assertIn("Explore requirements before implementation.", prompt)
+        self.assertIn("[feature idea]", prompt)
+        self.assertNotIn("SECRET BODY SHOULD NOT BE SENT TO SELECTOR.", prompt)
+
+    def test_repl_auto_skill_loads_context_and_prints_reason(self):
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            _write_skill_file(
+                cwd / ".agents" / "skills" / "code-review",
+                name="code-review",
+                description="Review code changes for bugs.",
+                body="Review `$ARGUMENTS` and report concrete risks.",
+            )
+            registry = SkillRegistry(cwd)
+            skill = registry.find("code-review")
+            self.assertIsNotNone(skill)
+            selector = _FixedSkillSelector(SkillSelection(skill, "任务是在执行代码审查"))
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+                skill_registry=registry,
+                skill_selector=selector,
+            )
+
+            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+                keep_running = repl_router.route("检查当前改动")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(selector.inputs, ["检查当前改动"])
+        self.assertEqual(agent.inputs[0][0], "检查当前改动")
+        context = agent.inputs[0][1]
+        self.assertIn("## 当前 Skill", context)
+        self.assertIn("code-review", context)
+        self.assertIn("Review `检查当前改动` and report concrete risks.", context)
+        output = "\n".join(renderer.messages)
+        self.assertIn("自动加载 skill: code-review", output)
+        self.assertIn("原因: 任务是在执行代码审查", output)
+
+    def test_repl_auto_skill_null_selection_runs_plain_input(self):
+        import cli_app.router as router
+
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+        selector = _FixedSkillSelector(SkillSelection(None, "没有明确匹配"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repl_router = router.ReplRouter(
+                runtime=ToolRuntime(ToolRegistry()),
+                cwd=Path(tmp),
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+                skill_selector=selector,
+            )
+
+            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+                keep_running = repl_router.route("随便聊聊")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(selector.inputs, ["随便聊聊"])
+        self.assertEqual(agent.inputs, [("随便聊聊", "")])
+        self.assertFalse(any("自动加载 skill:" in message for message in renderer.messages))
+
+    def test_repl_auto_skill_selector_is_disabled_by_default(self):
+        import cli_app.router as router
+
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+        selector = _FixedSkillSelector(SkillSelection(None, "不应调用"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repl_router = router.ReplRouter(
+                runtime=ToolRuntime(ToolRegistry()),
+                cwd=Path(tmp),
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+                skill_selector=selector,
+            )
+
+            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": ""}, clear=False):
+                keep_running = repl_router.route("普通输入")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(selector.inputs, [])
+        self.assertEqual(agent.inputs, [("普通输入", "")])
+
+    def test_auto_skill_selector_excludes_disabled_plugin_skills(self):
+        import cli_app.runner as runner
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            _write_skill_file(
+                cwd / ".agents" / "skills" / "code-review",
+                name="code-review",
+                description="Review code changes.",
+                body="Review current changes.",
+            )
+            plugin_root = cwd / "plugins" / "superpowers"
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            _write_skill_file(
+                plugin_root / "skills" / "brainstorming",
+                name="brainstorming",
+                description="Explore requirements before implementation.",
+                body="Brainstorm.",
+            )
+            prompts = []
+
+            def fake_chat(messages, tools=None):
+                prompts.extend(message.content or "" for message in messages)
+                return ChatResponse(content='{"skill": null, "reason": "no clear match"}')
+
+            selection = SkillSelector(
+                runner.build_skill_registry(cwd),
+                chat_fn=fake_chat,
+            ).select("我要加一个新功能")
+
+        prompt = "\n".join(prompts)
+        self.assertIsNone(selection.skill)
+        self.assertIn("code-review", prompt)
+        self.assertNotIn("brainstorming", prompt)
+        self.assertNotIn("superpowers:brainstorming", prompt)
+
     def test_runner_skill_registry_loads_manifest_declared_plugin_skills(self):
         import cli_app.runner as runner
 
@@ -1939,6 +2109,16 @@ class _FailingReactAgent:
         return None
 
 
+class _FixedSkillSelector:
+    def __init__(self, selection):
+        self.selection = selection
+        self.inputs = []
+
+    def select(self, user_input):
+        self.inputs.append(user_input)
+        return self.selection
+
+
 class _StaticRuntimeContextBuilder:
     def __init__(self, context):
         self.context = context
@@ -2031,6 +2211,26 @@ def _write_codex_plugin_manifest(plugin_root: Path, *, name: str, skills) -> Non
         "skills": skills,
     }
     (manifest_dir / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _write_skill_file(
+    skill_dir: Path,
+    *,
+    name: str,
+    description: str,
+    body: str,
+    argument_hint: str = "",
+) -> None:
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        f"name: {name}",
+        f"description: {description}",
+    ]
+    if argument_hint:
+        lines.append(f"argument-hint: {argument_hint}")
+    lines.extend(["---", "", body])
+    (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def _stream_content(calls, content):

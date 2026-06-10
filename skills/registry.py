@@ -94,6 +94,9 @@ class SkillRegistry:
         if definition is None:
             raise KeyError(f"skill not found: {name}")
 
+        return self.load_definition(definition)
+
+    def load_definition(self, definition: SkillDefinition) -> LoadedSkill:
         raw_content = _read_skill_file(definition.path)
         _, body = _split_frontmatter(raw_content)
         return LoadedSkill(

@@ -70,6 +70,16 @@ cli_app /skill <name> [任务]
   -> ReactAgent
 ```
 
+自动 skill 选择：
+
+```text
+普通输入 + PAICLI_AUTO_SKILLS=1
+  -> SkillSelector 只看 project/enabled plugin skill metadata
+  -> 选择 0/1 个 skill
+  -> 命中时 SkillContextBuilder 注入 skill body
+  -> ReactAgent 执行原始输入
+```
+
 插件 skill 贡献：
 
 ```text
@@ -218,6 +228,7 @@ find   查找文件
 PAICLI_LOG_LEVEL=WARNING
 PAICLI_DEBUG_LOG=1
 PAICLI_COMMAND_TIMEOUT_SECONDS=120
+PAICLI_AUTO_SKILLS=1
 ```
 
 `/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局 debug 日志。
@@ -272,10 +283,10 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
 | HITL | 已接入，合并到 `ToolRegistry` |
 | Session/长期记忆 | 已接入，session 实时记录会话树，长期记忆写入 `long_term.md` |
-| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明 |
+| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
 | Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `PAICLI_PLUGIN_ROOTS` 外部插件 root |
-| Plugin state | 进行中；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` |
+| Plugin state | 已接入；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` 和自动 skill 候选 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
 | Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
 | 测试 | 主线 import / HITL / session 树测试可单独验证 |
