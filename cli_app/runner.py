@@ -118,6 +118,7 @@ def repl(renderer: Renderer | None = None) -> int:
             run_agent_once=run_once,
             list_tools=list_tools,
             skill_registry=skill_registry,
+            skill_registry_builder=build_skill_registry,
             chat_fn=chat,
             build_branch_summary=generate_branch_summary,
         )

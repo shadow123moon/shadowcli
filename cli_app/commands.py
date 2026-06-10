@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager, TextLongTermMemory
+from plugin_runtime import LoadedPlugin, PluginDiagnostic
 from skills import SkillDefinition
 
 from .constants import (
@@ -9,6 +10,8 @@ from .constants import (
     MEMORY_COMMAND,
     NEW_COMMAND,
     PLAN_COMMAND,
+    PLUGIN_COMMAND,
+    PLUGINS_COMMAND,
     REMEMBER_COMMAND,
     RESUME_COMMAND,
     SKILL_COMMAND,
@@ -31,6 +34,24 @@ def parse_plan_command(user_input: str) -> str | None:
 
 def parse_skills_command(user_input: str) -> bool:
     return user_input.strip() == SKILLS_COMMAND
+
+
+def parse_plugins_command(user_input: str) -> bool:
+    return user_input.strip() == PLUGINS_COMMAND
+
+
+def parse_plugin_command(user_input: str) -> tuple[str, str] | None:
+    stripped = user_input.strip()
+    if stripped == PLUGIN_COMMAND:
+        return "", ""
+    if not stripped.startswith(f"{PLUGIN_COMMAND} "):
+        return None
+
+    remainder = stripped[len(PLUGIN_COMMAND):].strip()
+    if not remainder:
+        return "", ""
+    action, _, name = remainder.partition(" ")
+    return action.strip(), name.strip()
 
 
 def parse_skill_command(user_input: str) -> tuple[str, str] | None:
@@ -112,11 +133,36 @@ def format_skill_list(skills: Sequence[SkillDefinition]) -> str:
 
     lines = [f"可用 skills（{len(skills)} 个）:"]
     for skill in skills:
+        name = _skill_display_name(skill)
         source = f" [{skill.source}]" if skill.source else ""
         description = f": {skill.description}" if skill.description else ""
         hint = f"  {skill.argument_hint}" if skill.argument_hint else ""
-        lines.append(f"  - {skill.name}{source}{description}{hint}")
+        lines.append(f"  - {name}{source}{description}{hint}")
     return "\n".join(lines)
+
+
+def format_plugin_list(plugins: Sequence[LoadedPlugin], diagnostics: Sequence[PluginDiagnostic]) -> str:
+    if not plugins and not diagnostics:
+        return "没有发现插件。"
+
+    lines = [f"插件（{len(plugins)} 个）:"]
+    for plugin in plugins:
+        state = "enabled" if plugin.enabled else "disabled"
+        skill_count = len(plugin.skill_roots)
+        description = f": {plugin.manifest.description}" if plugin.manifest.description else ""
+        lines.append(f"  - {plugin.manifest.id} [{state}] skills={skill_count}{description}")
+    if diagnostics:
+        lines.append("诊断:")
+        for diagnostic in diagnostics:
+            lines.append(f"  - {diagnostic.plugin_path}: {diagnostic.message}")
+    return "\n".join(lines)
+
+
+def _skill_display_name(skill: SkillDefinition) -> str:
+    if skill.source.startswith("plugin:"):
+        plugin_name = skill.source.removeprefix("plugin:")
+        return f"{plugin_name}:{skill.name}"
+    return skill.name
 
 
 def format_session_tree(session: SessionManager, *, limit: int = 20) -> str:

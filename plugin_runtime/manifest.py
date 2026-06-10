@@ -39,6 +39,7 @@ class LoadedPlugin:
     root: Path
     manifest: PluginManifest
     skill_roots: list[SkillRoot]
+    enabled: bool = False
 
 
 def find_plugin_manifest_path(plugin_root: Path) -> Path | None:

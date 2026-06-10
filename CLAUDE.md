@@ -37,13 +37,15 @@ D:\paicli-main\paicli-main\           ← Java 源码
 
 ```text
 阶段 3: plugin manifest -> skill contributions，已完成并接入主入口
-阶段 4: 市面 skill/plugin 格式适配，进行中
-阶段 5: 插件启用/禁用/状态管理
+阶段 4: 市面 skill/plugin 格式适配，已完成
+阶段 5: 插件启用/禁用/状态管理，进行中
 阶段 6: hooks / MCP server / runtime extension contributions
 阶段 7: 从命令化 skill 升级到可解释的隐式 skill 选择
 ```
 
 阶段 4 的边界：优先兼容真实插件/skill 格式，包括 Codex 风格 `.codex-plugin/plugin.json`、kebab-case 插件 `name`、以 `./` 开头的 manifest path、字符串或列表形式的 `skills` 声明、外部插件缓存路径、`SKILL.md` / `skill.md` 入口、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过、无参数 `/skill <name>`；不在这一阶段实现 hooks、MCP server、runtime extension、插件安装卸载或自动 skill 匹配。
+
+阶段 5 的边界：做 `/plugins`、`/plugin enable <name>`、`/plugin disable <name>`、项目级 `.agents/plugins.json` 启用状态、插件默认禁用、enabled 插件 skill 注入、`plugin:skill` 显式命名空间调用；不在这一阶段实现插件安装卸载、hooks、MCP server、runtime extension 或自动 skill 匹配。
 
 ## 运行 / 测试
 

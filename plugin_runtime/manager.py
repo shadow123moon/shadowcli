@@ -13,6 +13,7 @@ from .manifest import (
     find_plugin_manifest_path,
     read_plugin_manifest,
 )
+from .state import PluginStateStore
 
 
 PLUGIN_ROOT = "plugins"
@@ -32,10 +33,12 @@ class PluginManager:
         *,
         plugins_dir: str = PLUGIN_ROOT,
         extra_plugin_roots: list[Path | str] | None = None,
+        enabled_plugins: set[str] | None = None,
     ):
         self.root = Path(root)
         self.plugins_root = self.root / plugins_dir
         self.extra_plugin_roots = [Path(path).expanduser() for path in extra_plugin_roots or []]
+        self.enabled_plugins = enabled_plugins
         self._loaded: list[LoadedPlugin] | None = None
         self._diagnostics: list[PluginDiagnostic] | None = None
 
@@ -47,7 +50,8 @@ class PluginManager:
     def skill_roots(self) -> list[SkillRoot]:
         roots = []
         for plugin in self.list_plugins():
-            roots.extend(plugin.skill_roots)
+            if plugin.enabled:
+                roots.extend(plugin.skill_roots)
         return roots
 
     def diagnostics(self) -> list[PluginDiagnostic]:
@@ -61,6 +65,7 @@ class PluginManager:
 
         plugins: list[LoadedPlugin] = []
         diagnostics: list[PluginDiagnostic] = []
+        enabled_plugins = self._enabled_plugins()
         plugin_roots = self._plugin_roots()
         if not plugin_roots:
             self._loaded = plugins
@@ -77,7 +82,12 @@ class PluginManager:
                 continue
 
             skill_roots = _skill_roots_for_plugin(plugin_root, manifest, diagnostics)
-            plugins.append(LoadedPlugin(root=plugin_root, manifest=manifest, skill_roots=skill_roots))
+            plugins.append(LoadedPlugin(
+                root=plugin_root,
+                manifest=manifest,
+                skill_roots=skill_roots,
+                enabled=manifest.id in enabled_plugins,
+            ))
 
         self._loaded = plugins
         self._diagnostics = diagnostics
@@ -89,6 +99,11 @@ class PluginManager:
         roots.extend(self.extra_plugin_roots)
         roots.extend(_env_plugin_roots(os.getenv(PLUGIN_ROOTS_ENV, "")))
         return _dedupe_paths(roots)
+
+    def _enabled_plugins(self) -> set[str]:
+        if self.enabled_plugins is not None:
+            return set(self.enabled_plugins)
+        return PluginStateStore(self.root).enabled()
 
 
 def _env_plugin_roots(value: str) -> list[Path]:

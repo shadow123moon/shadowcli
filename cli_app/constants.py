@@ -9,6 +9,8 @@ BANNER = (
 HELP = (
     "/help       显示帮助\n"
     "/tools      列出工具\n"
+    "/plugins    列出插件\n"
+    "/plugin     启用或禁用插件\n"
     "/skills     列出 skills\n"
     "/skill      使用指定 skill 执行任务，任务可省略\n"
     "/plan       计划执行任务\n"
@@ -23,6 +25,8 @@ HELP = (
 )
 
 PLAN_COMMAND = "/plan"
+PLUGIN_COMMAND = "/plugin"
+PLUGINS_COMMAND = "/plugins"
 SKILL_COMMAND = "/skill"
 SKILLS_COMMAND = "/skills"
 REMEMBER_COMMAND = "/remember"

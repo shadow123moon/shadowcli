@@ -76,13 +76,18 @@ class SkillRegistry:
             return None
 
         skills = self.list()
-        for skill in skills:
-            if skill.name == normalized:
-                return skill
-        for skill in skills:
-            if skill.directory_name == normalized:
-                return skill
-        return None
+        namespaced = _parse_namespaced_skill(normalized)
+        if namespaced is not None:
+            source, skill_name = namespaced
+            source_candidates = {source}
+            if not source.startswith("plugin:"):
+                source_candidates.add(f"plugin:{source}")
+            return _find_in_skills(
+                [skill for skill in skills if skill.source in source_candidates],
+                skill_name,
+            )
+
+        return _find_in_skills(skills, normalized)
 
     def load(self, name: str) -> LoadedSkill:
         definition = self.find(name)
@@ -199,6 +204,23 @@ def _dedupe_roots(roots: list[SkillRoot]) -> list[SkillRoot]:
         seen.add(key)
         deduped.append(root)
     return deduped
+
+
+def _parse_namespaced_skill(name: str) -> tuple[str, str] | None:
+    source, separator, skill_name = name.partition(":")
+    if not separator or not source.strip() or not skill_name.strip():
+        return None
+    return source.strip(), skill_name.strip()
+
+
+def _find_in_skills(skills: list[SkillDefinition], name: str) -> SkillDefinition | None:
+    for skill in skills:
+        if skill.name == name:
+            return skill
+    for skill in skills:
+        if skill.directory_name == name:
+            return skill
+    return None
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:

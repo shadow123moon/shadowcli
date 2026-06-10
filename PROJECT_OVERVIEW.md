@@ -20,6 +20,9 @@ python -m cli_app
 /tree               查看最近会话节点
 /jump <entry_id>    跳转到旧消息
 /tools              查看已注册工具
+/plugins            查看可用插件
+/plugin enable <name>
+/plugin disable <name>
 /skills             列出可用 skills
 /skill <name> [任务] 使用指定 skill 执行任务，任务可省略
 /quit               退出
@@ -75,6 +78,7 @@ PAICLI_PLUGIN_ROOTS=<external plugin root>
   -> PluginManager 校验 manifest
      - name 必须是 kebab-case
      - skills path 必须相对插件根并以 ./ 开头
+  -> .agents/plugins.json 决定 enabled / disabled
   -> SkillRoot(source="plugin:<id>", path=...)
   -> SkillRegistry 读取 SKILL.md / skill.md
 ```
@@ -89,7 +93,7 @@ PAICLI_PLUGIN_ROOTS=<external plugin root>
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
 | `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
-| `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，当前只加载 manifest 声明的 skill contributions |
+| `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，管理 `.agents/plugins.json` 启用状态，当前只加载 enabled 插件的 skill contributions |
 | `skills/` | 发现、加载并格式化 `SKILL.md` / `skill.md` 上下文 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
 | `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
@@ -271,6 +275,7 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
 | Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `PAICLI_PLUGIN_ROOTS` 外部插件 root |
+| Plugin state | 进行中；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
 | Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
 | 测试 | 主线 import / HITL / session 树测试可单独验证 |

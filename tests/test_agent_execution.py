@@ -20,7 +20,7 @@ from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
 from skills import SkillDefinition, SkillRegistry, SkillRoot
-from plugin_runtime import PluginManager
+from plugin_runtime import PluginManager, PluginStateStore
 from tooling import (
     BashTool,
     EditTool,
@@ -334,6 +334,7 @@ class SkillRegistryTests(unittest.TestCase):
             project_skill.mkdir(parents=True)
             plugin_skill.mkdir(parents=True)
             _write_codex_plugin_manifest(root / "plugins" / "superpowers", name="superpowers", skills="./skills")
+            PluginStateStore(root).enable("superpowers")
             for skill_dir, description in [
                 (project_skill, "Project review."),
                 (plugin_skill, "Plugin review."),
@@ -357,6 +358,37 @@ class SkillRegistryTests(unittest.TestCase):
 
         self.assertEqual(skill.source, "project")
         self.assertEqual(skill.description, "Project review.")
+
+    def test_find_accepts_plugin_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project_skill = root / ".agents" / "skills" / "review"
+            plugin_skill = root / "plugins" / "superpowers" / "skills" / "review"
+            project_skill.mkdir(parents=True)
+            plugin_skill.mkdir(parents=True)
+            for skill_dir, description in [
+                (project_skill, "Project review."),
+                (plugin_skill, "Plugin review."),
+            ]:
+                (skill_dir / "SKILL.md").write_text(
+                    "\n".join([
+                        "---",
+                        "name: review",
+                        f"description: {description}",
+                        "---",
+                        "",
+                        "Review.",
+                    ]),
+                    encoding="utf-8",
+                )
+
+            registry = SkillRegistry(
+                root,
+                extra_roots=[SkillRoot(source="plugin:superpowers", path=root / "plugins" / "superpowers" / "skills")],
+            )
+
+            self.assertEqual(registry.find("review").description, "Project review.")
+            self.assertEqual(registry.find("superpowers:review").description, "Plugin review.")
 
     def test_registry_accepts_external_skill_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -425,6 +457,7 @@ class PluginManagerTests(unittest.TestCase):
             skill_dir = plugin_root / "skills" / "brainstorming"
             skill_dir.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            PluginStateStore(cwd).enable("superpowers")
             (skill_dir / "SKILL.md").write_text(
                 "\n".join([
                     "---",
@@ -463,11 +496,32 @@ class PluginManagerTests(unittest.TestCase):
             skill_dir = plugin_root / "skills" / "brainstorming"
             skill_dir.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills/")
+            PluginStateStore(root).enable("superpowers")
 
             manager = PluginManager(root, extra_plugin_roots=[plugin_root])
 
             self.assertEqual(manager.diagnostics(), [])
             self.assertEqual(manager.skill_roots(), [
+                SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve()),
+            ])
+
+    def test_plugin_skills_are_disabled_until_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "superpowers"
+            (plugin_root / "skills").mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+
+            disabled = PluginManager(root)
+
+            self.assertEqual(disabled.skill_roots(), [])
+            self.assertFalse(disabled.list_plugins()[0].enabled)
+
+            PluginStateStore(root).enable("superpowers")
+            enabled = PluginManager(root)
+
+            self.assertTrue(enabled.list_plugins()[0].enabled)
+            self.assertEqual(enabled.skill_roots(), [
                 SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve()),
             ])
 
@@ -480,6 +534,7 @@ class PluginManagerTests(unittest.TestCase):
             first.mkdir(parents=True)
             second.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="github", skills=["./skills", "./more-skills"])
+            PluginStateStore(root).enable("github")
 
             roots = PluginManager(root, extra_plugin_roots=[plugin_root]).skill_roots()
 
@@ -499,6 +554,7 @@ class PluginManagerTests(unittest.TestCase):
             root.mkdir()
             skill_dir.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills/")
+            PluginStateStore(root).enable("superpowers")
 
             with patch.dict(os.environ, {"PAICLI_PLUGIN_ROOTS": str(plugin_root)}):
                 roots = PluginManager(root).skill_roots()
@@ -624,6 +680,7 @@ class PluginManagerTests(unittest.TestCase):
             skill_root = plugin_root / "skills"
             skill_root.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            PluginStateStore(root).enable("superpowers")
 
             manager = PluginManager(root)
 
@@ -1105,6 +1162,13 @@ class CliAgentTests(unittest.TestCase):
     def test_tree_and_jump_commands_are_parsed(self):
         self.assertTrue(cli.parse_skills_command("/skills"))
         self.assertFalse(cli.parse_skills_command("/skills now"))
+        self.assertTrue(cli.parse_plugins_command("/plugins"))
+        self.assertFalse(cli.parse_plugins_command("/plugins now"))
+        self.assertEqual(cli.parse_plugin_command("/plugin"), ("", ""))
+        self.assertEqual(cli.parse_plugin_command("/plugin enable superpowers"), ("enable", "superpowers"))
+        self.assertEqual(cli.parse_plugin_command("/plugin disable superpowers"), ("disable", "superpowers"))
+        self.assertEqual(cli.parse_plugin_command("/plugin enable"), ("enable", ""))
+        self.assertIsNone(cli.parse_plugin_command("/pluginx enable superpowers"))
         self.assertEqual(cli.parse_skill_command("/skill"), ("", ""))
         self.assertEqual(cli.parse_skill_command("/skill code-review"), ("code-review", ""))
         self.assertEqual(cli.parse_skill_command("/skill code-review 检查当前改动"), ("code-review", "检查当前改动"))
@@ -1253,6 +1317,54 @@ class CliAgentTests(unittest.TestCase):
         self.assertTrue(any("Review code changes for bugs." in message for message in renderer.messages))
         self.assertTrue(any("project" in message for message in renderer.messages))
 
+    def test_repl_plugin_enable_refreshes_skills(self):
+        import cli_app.runner as runner
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            plugin_root = cwd / "plugins" / "superpowers"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: Brainstorm ideas.",
+                    "---",
+                    "",
+                    "Brainstorm.",
+                ]),
+                encoding="utf-8",
+            )
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=_FailingSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: self.fail("/plugin 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/plugin 不应运行 agent"),
+                skill_registry_builder=runner.build_skill_registry,
+            )
+
+            keep_running = repl_router.route("/plugins")
+            repl_router.route("/skills")
+            repl_router.route("/plugin enable superpowers")
+            repl_router.route("/skills")
+
+        self.assertTrue(keep_running)
+        joined = "\n".join(renderer.messages)
+        self.assertIn("superpowers", joined)
+        self.assertIn("disabled", joined)
+        self.assertIn("已启用插件: superpowers", joined)
+        self.assertIn("superpowers:brainstorming", joined)
+
     def test_repl_skill_command_loads_skill_context_and_runs_task(self):
         import cli_app.router as router
 
@@ -1371,6 +1483,7 @@ class CliAgentTests(unittest.TestCase):
             skill_dir = plugin_root / "skills" / "brainstorming"
             skill_dir.mkdir(parents=True)
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            PluginStateStore(cwd).enable("superpowers")
             (skill_dir / "SKILL.md").write_text(
                 "\n".join([
                     "---",

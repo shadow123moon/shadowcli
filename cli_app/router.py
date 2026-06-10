@@ -9,18 +9,22 @@ from agent import ReactAgent
 from llm import chat as default_chat
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
 from sessions.types import DEFAULT_SESSION_TITLE
+from plugin_runtime import PluginManager, PluginStateStore
 from skills import SkillContextBuilder, SkillRegistry
 from .commands import (
     entry_label,
     entry_preview,
     format_compaction_result,
     format_memory_status,
+    format_plugin_list,
     format_skill_list,
     handle_remember,
     parse_compact_command,
     parse_jump_command,
     parse_new_command,
     parse_plan_command,
+    parse_plugin_command,
+    parse_plugins_command,
     parse_remember_command,
     parse_resume_command,
     parse_skill_command,
@@ -105,6 +109,7 @@ class ReplRouter:
         run_agent_once: Callable[..., None],
         list_tools: Callable[[Any], str] = default_list_tools,
         skill_registry: SkillRegistry | None = None,
+        skill_registry_builder: Callable[[Path], SkillRegistry] | None = None,
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
     ) -> None:
@@ -116,7 +121,8 @@ class ReplRouter:
         self.build_agent = build_agent
         self.run_agent_once = run_agent_once
         self.list_tools = list_tools
-        self.skill_registry = skill_registry or SkillRegistry(cwd)
+        self.skill_registry_builder = skill_registry_builder or (lambda path: SkillRegistry(path))
+        self.skill_registry = skill_registry or self.skill_registry_builder(cwd)
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
 
@@ -135,6 +141,13 @@ class ReplRouter:
             return True
         if line == "/tools":
             self.renderer.message(self.list_tools(self.runtime))
+            return True
+        if parse_plugins_command(line):
+            self._handle_plugins()
+            return True
+        plugin_input = parse_plugin_command(line)
+        if plugin_input is not None:
+            self._handle_plugin(*plugin_input)
             return True
         if parse_skills_command(line):
             self.renderer.message(format_skill_list(self.skill_registry.list()))
@@ -260,6 +273,30 @@ class ReplRouter:
             self.renderer.message("用法: /plan <任务>")
             return
         self._run_agent_line(line)
+
+    def _handle_plugins(self) -> None:
+        manager = PluginManager(self.cwd)
+        self.renderer.message(format_plugin_list(manager.list_plugins(), manager.diagnostics()))
+
+    def _handle_plugin(self, action: str, name: str) -> None:
+        if action not in {"enable", "disable"} or not name:
+            self.renderer.message("用法: /plugin enable|disable <name>")
+            return
+
+        manager = PluginManager(self.cwd)
+        known = {plugin.manifest.id for plugin in manager.list_plugins()}
+        if name not in known:
+            self.renderer.message(f"未找到插件: {name}")
+            return
+
+        state = PluginStateStore(self.cwd)
+        if action == "enable":
+            state.enable(name)
+            self.renderer.message(f"已启用插件: {name}")
+        else:
+            state.disable(name)
+            self.renderer.message(f"已禁用插件: {name}")
+        self.skill_registry = self.skill_registry_builder(self.cwd)
 
     def _handle_skill(self, name: str, task: str) -> None:
         if not name:
