@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from skills import SkillRoot
 
 
 PLUGIN_MANIFEST = "plugin.json"
+CODEX_PLUGIN_DIR = ".codex-plugin"
+PLUGIN_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 @dataclass(frozen=True)
@@ -38,8 +41,18 @@ class LoadedPlugin:
     skill_roots: list[SkillRoot]
 
 
+def find_plugin_manifest_path(plugin_root: Path) -> Path | None:
+    manifest_path = plugin_root / CODEX_PLUGIN_DIR / PLUGIN_MANIFEST
+    if manifest_path.exists():
+        return manifest_path
+    return None
+
+
 def read_plugin_manifest(plugin_root: Path) -> tuple[PluginManifest | None, list[PluginDiagnostic]]:
-    manifest_path = plugin_root / PLUGIN_MANIFEST
+    manifest_path = find_plugin_manifest_path(plugin_root)
+    if manifest_path is None:
+        return None, [_diagnostic(plugin_root, "plugin manifest not found")]
+
     try:
         raw = manifest_path.read_text(encoding="utf-8")
         data = json.loads(raw)
@@ -50,22 +63,16 @@ def read_plugin_manifest(plugin_root: Path) -> tuple[PluginManifest | None, list
         return None, [_diagnostic(plugin_root, "plugin.json must contain a JSON object")]
 
     diagnostics: list[PluginDiagnostic] = []
-    plugin_id = _required_string(data, "id", plugin_root, diagnostics)
-    if plugin_id is None:
-        return None, diagnostics
-    if plugin_id != plugin_root.name:
-        diagnostics.append(_diagnostic(
-            plugin_root,
-            f"id must match directory name: expected {plugin_root.name!r}, got {plugin_id!r}",
-        ))
-        return None, diagnostics
     name = _required_string(data, "name", plugin_root, diagnostics)
     version = _required_string(data, "version", plugin_root, diagnostics)
+    if name is not None and not PLUGIN_NAME_PATTERN.fullmatch(name):
+        diagnostics.append(_diagnostic(plugin_root, "name must be kebab-case"))
+        name = None
     if name is None or version is None:
         return None, diagnostics
 
     manifest = PluginManifest(
-        id=plugin_id,
+        id=name,
         name=name,
         version=version,
         description=_optional_string(data, "description", "", plugin_root, diagnostics),
@@ -81,14 +88,26 @@ def _read_skill_contributions(
 ) -> list[PluginSkillContribution]:
     if raw_skills is None:
         return []
+    if isinstance(raw_skills, str):
+        if raw_skills.strip():
+            return [PluginSkillContribution(path=raw_skills.strip())]
+        diagnostics.append(_diagnostic(plugin_root, "skills must not be empty"))
+        return []
     if not isinstance(raw_skills, list):
-        diagnostics.append(_diagnostic(plugin_root, "skills must be a list"))
+        diagnostics.append(_diagnostic(plugin_root, "skills must be a string or list"))
         return []
 
     skills = []
     for index, item in enumerate(raw_skills):
+        if isinstance(item, str):
+            path = item.strip()
+            if not path:
+                diagnostics.append(_diagnostic(plugin_root, f"skills[{index}] must be a non-empty string"))
+                continue
+            skills.append(PluginSkillContribution(path=path))
+            continue
         if not isinstance(item, dict):
-            diagnostics.append(_diagnostic(plugin_root, f"skills[{index}] must be an object"))
+            diagnostics.append(_diagnostic(plugin_root, f"skills[{index}] must be a string or object"))
             continue
         path = item.get("path")
         if not isinstance(path, str) or not path.strip():

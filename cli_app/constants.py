@@ -10,7 +10,7 @@ HELP = (
     "/help       显示帮助\n"
     "/tools      列出工具\n"
     "/skills     列出 skills\n"
-    "/skill      使用指定 skill 执行任务\n"
+    "/skill      使用指定 skill 执行任务，任务可省略\n"
     "/plan       计划执行任务\n"
     "/memory     显示长期记忆\n"
     "/remember   写入长期记忆\n"

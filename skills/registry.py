@@ -18,6 +18,12 @@ class SkillRoot:
 
 
 @dataclass(frozen=True)
+class SkillDiagnostic:
+    skill_path: Path
+    message: str
+
+
+@dataclass(frozen=True)
 class SkillDefinition:
     name: str
     description: str
@@ -48,22 +54,32 @@ class SkillRegistry:
     ):
         self.root = Path(root)
         self.roots = roots if roots is not None else default_skill_roots(self.root, extra_roots=extra_roots)
+        self._diagnostics: list[SkillDiagnostic] | None = None
 
     def list(self) -> list[SkillDefinition]:
         skills = []
+        diagnostics: list[SkillDiagnostic] = []
         for skill_root in self.roots:
-            skills.extend(_read_root(skill_root))
+            skills.extend(_read_root(skill_root, diagnostics))
+        self._diagnostics = diagnostics
         return skills
+
+    def diagnostics(self) -> list[SkillDiagnostic]:
+        if self._diagnostics is None:
+            self.list()
+        assert self._diagnostics is not None
+        return list(self._diagnostics)
 
     def find(self, name: str) -> SkillDefinition | None:
         normalized = name.strip()
         if not normalized:
             return None
 
-        for skill in self.list():
+        skills = self.list()
+        for skill in skills:
             if skill.name == normalized:
                 return skill
-        for skill in self.list():
+        for skill in skills:
             if skill.directory_name == normalized:
                 return skill
         return None
@@ -73,7 +89,7 @@ class SkillRegistry:
         if definition is None:
             raise KeyError(f"skill not found: {name}")
 
-        raw_content = definition.path.read_text(encoding="utf-8")
+        raw_content = _read_skill_file(definition.path)
         _, body = _split_frontmatter(raw_content)
         return LoadedSkill(
             definition=definition,
@@ -94,22 +110,43 @@ def default_skill_roots(root: Path, *, extra_roots: list[SkillRoot] | None = Non
     return _dedupe_roots(roots)
 
 
-def _read_root(root: SkillRoot) -> list[SkillDefinition]:
+def _read_root(root: SkillRoot, diagnostics: list[SkillDiagnostic]) -> list[SkillDefinition]:
     skills_root = root.path
     if not skills_root.exists():
         return []
 
     skills = []
-    for skill_dir in sorted(path for path in skills_root.iterdir() if path.is_dir()):
-        entrypoint = skill_dir / SKILL_ENTRYPOINT
-        if entrypoint.exists():
+    try:
+        skill_dirs = sorted(path for path in skills_root.iterdir() if path.is_dir())
+    except OSError as exc:
+        diagnostics.append(_diagnostic(skills_root, f"failed to read skill root: {exc}"))
+        return []
+
+    for skill_dir in skill_dirs:
+        try:
+            entrypoint = _skill_entrypoint(skill_dir)
+            if entrypoint is None:
+                continue
             skills.append(_read_definition(
                 entrypoint,
                 directory_name=skill_dir.name,
                 source=root.source,
                 root=root.path,
             ))
+        except (OSError, UnicodeError) as exc:
+            diagnostics.append(_diagnostic(skill_dir, f"failed to read skill: {exc}"))
     return skills
+
+
+def _skill_entrypoint(skill_dir: Path) -> Path | None:
+    preferred = skill_dir / SKILL_ENTRYPOINT
+    if preferred.exists() and preferred.name in {path.name for path in skill_dir.iterdir() if path.is_file()}:
+        return preferred
+
+    for path in sorted(item for item in skill_dir.iterdir() if item.is_file()):
+        if path.name.lower() == SKILL_ENTRYPOINT.lower():
+            return path
+    return None
 
 
 def _read_definition(
@@ -119,7 +156,7 @@ def _read_definition(
     source: str,
     root: Path,
 ) -> SkillDefinition:
-    raw_content = path.read_text(encoding="utf-8")
+    raw_content = _read_skill_file(path)
     frontmatter, body = _split_frontmatter(raw_content)
     metadata = _parse_frontmatter(frontmatter)
     return SkillDefinition(
@@ -179,16 +216,45 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
-    for line in text.splitlines():
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or ":" not in stripped:
+            index += 1
             continue
 
         key, raw_value = stripped.split(":", 1)
         key = key.strip()
-        value = _parse_scalar(raw_value.strip())
-        metadata[key] = value
+        raw_value = raw_value.strip()
+        if raw_value.startswith((">", "|")):
+            block_lines, index = _consume_block_scalar(lines, index + 1)
+            metadata[key] = _parse_block_scalar(raw_value, block_lines)
+            continue
+
+        metadata[key] = _parse_scalar(raw_value)
+        index += 1
     return metadata
+
+
+def _consume_block_scalar(lines: list[str], start: int) -> tuple[list[str], int]:
+    block_lines = []
+    index = start
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and not line.startswith((" ", "\t")):
+            break
+        block_lines.append(line.strip())
+        index += 1
+    return block_lines, index
+
+
+def _parse_block_scalar(style: str, lines: list[str]) -> str:
+    content_lines = [line for line in lines if line]
+    if style.startswith("|"):
+        return "\n".join(content_lines)
+    return " ".join(content_lines)
 
 
 def _parse_scalar(value: str) -> str | bool:
@@ -212,3 +278,11 @@ def _first_paragraph(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _read_skill_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def _diagnostic(path: Path, message: str) -> SkillDiagnostic:
+    return SkillDiagnostic(skill_path=path, message=message)

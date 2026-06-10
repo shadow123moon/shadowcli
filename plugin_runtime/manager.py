@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from skills import SkillRoot
 
 from .manifest import (
-    PLUGIN_MANIFEST,
     LoadedPlugin,
     PluginDiagnostic,
     PluginManifest,
     PluginSkillContribution,
+    find_plugin_manifest_path,
     read_plugin_manifest,
 )
 
 
 PLUGIN_ROOT = "plugins"
+PLUGIN_ROOTS_ENV = "PAICLI_PLUGIN_ROOTS"
 
 
 class PluginManager:
@@ -24,9 +26,16 @@ class PluginManager:
     extensions, and app metadata stay out of this loader until later phases.
     """
 
-    def __init__(self, root: Path | str, *, plugins_dir: str = PLUGIN_ROOT):
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        plugins_dir: str = PLUGIN_ROOT,
+        extra_plugin_roots: list[Path | str] | None = None,
+    ):
         self.root = Path(root)
         self.plugins_root = self.root / plugins_dir
+        self.extra_plugin_roots = [Path(path).expanduser() for path in extra_plugin_roots or []]
         self._loaded: list[LoadedPlugin] | None = None
         self._diagnostics: list[PluginDiagnostic] | None = None
 
@@ -52,14 +61,14 @@ class PluginManager:
 
         plugins: list[LoadedPlugin] = []
         diagnostics: list[PluginDiagnostic] = []
-        if not self.plugins_root.exists():
+        plugin_roots = self._plugin_roots()
+        if not plugin_roots:
             self._loaded = plugins
             self._diagnostics = diagnostics
             return
 
-        for plugin_root in sorted(path for path in self.plugins_root.iterdir() if path.is_dir()):
-            manifest_path = plugin_root / PLUGIN_MANIFEST
-            if not manifest_path.exists():
+        for plugin_root in plugin_roots:
+            if find_plugin_manifest_path(plugin_root) is None:
                 continue
 
             manifest, manifest_diagnostics = read_plugin_manifest(plugin_root)
@@ -72,6 +81,34 @@ class PluginManager:
 
         self._loaded = plugins
         self._diagnostics = diagnostics
+
+    def _plugin_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        if self.plugins_root.exists():
+            roots.extend(sorted(path for path in self.plugins_root.iterdir() if path.is_dir()))
+        roots.extend(self.extra_plugin_roots)
+        roots.extend(_env_plugin_roots(os.getenv(PLUGIN_ROOTS_ENV, "")))
+        return _dedupe_paths(roots)
+
+
+def _env_plugin_roots(value: str) -> list[Path]:
+    roots = []
+    for item in (part.strip() for part in value.split(os.pathsep)):
+        if item:
+            roots.append(Path(item).expanduser())
+    return roots
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen = set()
+    deduped = []
+    for path in paths:
+        key = path.resolve() if path.exists() else path.absolute()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
 
 
 def _skill_roots_for_plugin(
@@ -94,6 +131,13 @@ def _resolve_contribution_path(
     index: int,
     diagnostics: list[PluginDiagnostic],
 ) -> Path | None:
+    if not contribution.path.startswith("./"):
+        diagnostics.append(PluginDiagnostic(
+            plugin_path=plugin_root,
+            message=f"skills[{index}].path must start with './'",
+        ))
+        return None
+
     relative = Path(contribution.path)
     if relative.is_absolute():
         diagnostics.append(PluginDiagnostic(

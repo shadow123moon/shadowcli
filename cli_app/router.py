@@ -37,6 +37,7 @@ from ui import (
 )
 
 log = logging.getLogger("cli_app.runner")
+DEFAULT_SKILL_TASK = "按 skill 指令执行"
 
 
 def navigate_session_branch(
@@ -261,8 +262,8 @@ class ReplRouter:
         self._run_agent_line(line)
 
     def _handle_skill(self, name: str, task: str) -> None:
-        if not name or not task:
-            self.renderer.message("用法: /skill <name> <任务>")
+        if not name:
+            self.renderer.message("用法: /skill <name> [任务]")
             return
         try:
             loaded_skill = self.skill_registry.load(name)
@@ -279,9 +280,10 @@ class ReplRouter:
             self.renderer,
             chat_fn=self.chat_fn,
         )
+        agent_task = task or DEFAULT_SKILL_TASK
         self.run_agent_once(
             active_agent,
-            task,
+            agent_task,
             runtime_context_builder=SkillContextBuilder(
                 base=self.runtime_context_builder,
                 skill=loaded_skill,

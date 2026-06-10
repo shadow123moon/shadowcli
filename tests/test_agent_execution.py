@@ -19,7 +19,7 @@ from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
-from skills import SkillRegistry, SkillRoot
+from skills import SkillDefinition, SkillRegistry, SkillRoot
 from plugin_runtime import PluginManager
 from tooling import (
     BashTool,
@@ -114,6 +114,59 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(skill.argument_hint, "[scope]")
         self.assertEqual(skill.path.name, "SKILL.md")
 
+    def test_scan_skips_bad_skill_file_and_records_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / ".agents" / "skills" / "good"
+            bad = root / ".agents" / "skills" / "bad"
+            good.mkdir(parents=True)
+            bad.mkdir(parents=True)
+            (good / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: good",
+                    "description: Valid skill.",
+                    "---",
+                    "",
+                    "Run safely.",
+                ]),
+                encoding="utf-8",
+            )
+            (bad / "SKILL.md").write_bytes(b"\xff\xfe\xff")
+
+            registry = SkillRegistry(root, roots=[SkillRoot(source="project", path=root / ".agents" / "skills")])
+            skills = registry.list()
+
+        self.assertEqual([skill.name for skill in skills], ["good"])
+        self.assertTrue(any("failed to read skill" in diagnostic.message for diagnostic in registry.diagnostics()))
+
+    def test_scan_supports_bom_and_yaml_folded_description(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: brainstorming",
+                    "description: >-",
+                    "  Use when: starting creative work",
+                    "  or changing product behavior.",
+                    "---",
+                    "",
+                    "Ask questions first.",
+                ]),
+                encoding="utf-8-sig",
+            )
+
+            skills = SkillRegistry(
+                root,
+                roots=[SkillRoot(source="project", path=root / ".agents" / "skills")],
+            ).list()
+
+        self.assertEqual(len(skills), 1)
+        self.assertEqual(skills[0].description, "Use when: starting creative work or changing product behavior.")
+
     def test_load_returns_skill_body_without_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -169,6 +222,28 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(registry.find("review").path, skill_dir / "SKILL.md")
             self.assertIsNone(registry.find("missing"))
 
+    def test_find_scans_skill_list_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            definition = SkillDefinition(
+                name="code-review",
+                description="Review code.",
+                path=root / "SKILL.md",
+                directory_name="review",
+            )
+            registry = SkillRegistry(root, roots=[])
+            calls = 0
+
+            def fake_list():
+                nonlocal calls
+                calls += 1
+                return [definition]
+
+            registry.list = fake_list
+
+            self.assertEqual(registry.find("review"), definition)
+            self.assertEqual(calls, 1)
+
     def test_default_roots_ignore_plugin_skill_dirs_without_manifest_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -204,6 +279,32 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertTrue(any(skill.path == project_skill / "SKILL.md" for skill in skills))
         self.assertFalse(any(skill.path == plugin_skill / "SKILL.md" for skill in skills))
 
+    def test_scan_discovers_lowercase_skill_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "lowercase"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "skill.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: lowercase",
+                    "description: Lowercase entrypoint.",
+                    "---",
+                    "",
+                    "Load this skill.",
+                ]),
+                encoding="utf-8",
+            )
+
+            skills = SkillRegistry(
+                root,
+                roots=[SkillRoot(source="project", path=root / ".agents" / "skills")],
+            ).list()
+
+        self.assertEqual(len(skills), 1)
+        self.assertEqual(skills[0].name, "lowercase")
+        self.assertEqual(skills[0].path.name, "skill.md")
+
     def test_explicit_empty_roots_disable_all_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -232,7 +333,7 @@ class SkillRegistryTests(unittest.TestCase):
             plugin_skill = root / "plugins" / "superpowers" / "skills" / "review"
             project_skill.mkdir(parents=True)
             plugin_skill.mkdir(parents=True)
-            _write_plugin_manifest(root / "plugins" / "superpowers", plugin_id="superpowers")
+            _write_codex_plugin_manifest(root / "plugins" / "superpowers", name="superpowers", skills="./skills")
             for skill_dir, description in [
                 (project_skill, "Project review."),
                 (plugin_skill, "Plugin review."),
@@ -323,7 +424,7 @@ class PluginManagerTests(unittest.TestCase):
             plugin_root = cwd / "plugins" / "superpowers"
             skill_dir = plugin_root / "skills" / "brainstorming"
             skill_dir.mkdir(parents=True)
-            _write_plugin_manifest(plugin_root, plugin_id="superpowers")
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
             (skill_dir / "SKILL.md").write_text(
                 "\n".join([
                     "---",
@@ -355,6 +456,55 @@ class PluginManagerTests(unittest.TestCase):
         self.assertTrue(any("brainstorming" in message for message in renderer.messages))
         self.assertTrue(any("plugin:superpowers" in message for message in renderer.messages))
 
+    def test_codex_plugin_manifest_declares_string_skill_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "cache" / "openai-curated" / "superpowers" / "2abb1c44"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            skill_dir.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills/")
+
+            manager = PluginManager(root, extra_plugin_roots=[plugin_root])
+
+            self.assertEqual(manager.diagnostics(), [])
+            self.assertEqual(manager.skill_roots(), [
+                SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve()),
+            ])
+
+    def test_codex_plugin_manifest_accepts_string_skill_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "cache" / "github" / "2abb1c44"
+            first = plugin_root / "skills"
+            second = plugin_root / "more-skills"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="github", skills=["./skills", "./more-skills"])
+
+            roots = PluginManager(root, extra_plugin_roots=[plugin_root]).skill_roots()
+
+        self.assertEqual(
+            roots,
+            [
+                SkillRoot(source="plugin:github", path=first.resolve()),
+                SkillRoot(source="plugin:github", path=second.resolve()),
+            ],
+        )
+
+    def test_external_plugin_roots_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            plugin_root = Path(tmp) / "codex-cache" / "superpowers" / "2abb1c44"
+            skill_dir = plugin_root / "skills" / "brainstorming"
+            root.mkdir()
+            skill_dir.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills/")
+
+            with patch.dict(os.environ, {"PAICLI_PLUGIN_ROOTS": str(plugin_root)}):
+                roots = PluginManager(root).skill_roots()
+
+        self.assertEqual(roots, [SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve())])
+
     def test_plugin_dir_without_manifest_contributes_no_skill_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -367,22 +517,55 @@ class PluginManagerTests(unittest.TestCase):
             self.assertEqual(manager.skill_roots(), [])
             self.assertEqual(manager.diagnostics(), [])
 
+    def test_root_plugin_json_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "superpowers"
+            skill_root = plugin_root / "skills"
+            skill_root.mkdir(parents=True)
+            (plugin_root / "plugin.json").write_text(
+                json.dumps({
+                    "id": "superpowers",
+                    "name": "superpowers",
+                    "version": "1.0.0",
+                    "skills": [{"path": "skills"}],
+                }),
+                encoding="utf-8",
+            )
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.diagnostics(), [])
+
     def test_skill_path_must_be_string(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_root = root / "plugins" / "broken"
-            _write_plugin_manifest(plugin_root, plugin_id="broken", skills=[{"path": 123}])
+            _write_codex_plugin_manifest(plugin_root, name="broken", skills=[{"path": 123}])
 
             manager = PluginManager(root)
 
             self.assertEqual(manager.skill_roots(), [])
             self.assertTrue(any("skills[0].path" in diagnostic.message for diagnostic in manager.diagnostics()))
 
+    def test_skill_path_must_start_with_dot_slash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "bad-path"
+            (plugin_root / "skills").mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="bad-path", skills="skills")
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.skill_roots(), [])
+            self.assertTrue(any("must start with './'" in diagnostic.message for diagnostic in manager.diagnostics()))
+
     def test_skill_path_cannot_escape_plugin_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_root = root / "plugins" / "escape"
-            _write_plugin_manifest(plugin_root, plugin_id="escape", skills=[{"path": "../outside"}])
+            _write_codex_plugin_manifest(plugin_root, name="escape", skills=[{"path": "./../outside"}])
 
             manager = PluginManager(root)
 
@@ -393,7 +576,9 @@ class PluginManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_root = root / "plugins" / "file-skill"
-            _write_plugin_manifest(plugin_root, plugin_id="file-skill", skills=[{"path": "plugin.json"}])
+            plugin_root.mkdir(parents=True)
+            (plugin_root / "README.md").write_text("not a skill directory", encoding="utf-8")
+            _write_codex_plugin_manifest(plugin_root, name="file-skill", skills=[{"path": "./README.md"}])
 
             manager = PluginManager(root)
 
@@ -404,10 +589,10 @@ class PluginManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             plugin_root = root / "plugins" / "minimal"
-            plugin_root.mkdir(parents=True)
-            (plugin_root / "plugin.json").write_text(
+            manifest_dir = plugin_root / ".codex-plugin"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "plugin.json").write_text(
                 json.dumps({
-                    "id": "minimal",
                     "skills": [{"path": "skills"}],
                 }),
                 encoding="utf-8",
@@ -420,16 +605,32 @@ class PluginManagerTests(unittest.TestCase):
             self.assertTrue(any("name must be a non-empty string" in message for message in messages))
             self.assertTrue(any("version must be a non-empty string" in message for message in messages))
 
-    def test_plugin_id_must_match_directory_name(self):
+    def test_plugin_name_must_be_kebab_case(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            plugin_root = root / "plugins" / "actual-dir"
-            _write_plugin_manifest(plugin_root, plugin_id="manifest-id")
+            plugin_root = root / "plugins" / "super-powers"
+            (plugin_root / "skills").mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="Super Powers", skills="./skills")
 
             manager = PluginManager(root)
 
             self.assertEqual(manager.skill_roots(), [])
-            self.assertTrue(any("id must match directory name" in diagnostic.message for diagnostic in manager.diagnostics()))
+            self.assertTrue(any("name must be kebab-case" in diagnostic.message for diagnostic in manager.diagnostics()))
+
+    def test_codex_plugin_name_can_differ_from_cache_directory_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "2abb1c44"
+            skill_root = plugin_root / "skills"
+            skill_root.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+
+            manager = PluginManager(root)
+
+            self.assertEqual(manager.diagnostics(), [])
+            self.assertEqual(manager.skill_roots(), [
+                SkillRoot(source="plugin:superpowers", path=skill_root.resolve()),
+            ])
 
 
 class ReactAgentTests(unittest.TestCase):
@@ -1096,6 +1297,48 @@ class CliAgentTests(unittest.TestCase):
         self.assertIn("Review `检查当前改动` and report concrete risks.", context)
         self.assertNotIn("$ARGUMENTS", context)
 
+    def test_repl_skill_command_allows_empty_task(self):
+        import cli_app.router as router
+
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            skill_dir = cwd / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes.",
+                    "---",
+                    "",
+                    "Review current state. $ARGUMENTS",
+                ]),
+                encoding="utf-8",
+            )
+
+            repl_router = router.ReplRouter(
+                runtime=runtime,
+                cwd=cwd,
+                session_store=_StubSessionStore(),
+                long_term=[],
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+            )
+
+            keep_running = repl_router.route("/skill code-review")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(agent.inputs[0][0], "按 skill 指令执行")
+        context = agent.inputs[0][1]
+        self.assertIn("Review current state.", context)
+        self.assertNotIn("$ARGUMENTS", context)
+        self.assertNotIn("- arguments:", context)
+
     def test_repl_skill_command_reports_missing_skill_without_running_agent(self):
         import cli_app.router as router
 
@@ -1127,7 +1370,7 @@ class CliAgentTests(unittest.TestCase):
             plugin_root = cwd / "plugins" / "superpowers"
             skill_dir = plugin_root / "skills" / "brainstorming"
             skill_dir.mkdir(parents=True)
-            _write_plugin_manifest(plugin_root, plugin_id="superpowers")
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
             (skill_dir / "SKILL.md").write_text(
                 "\n".join([
                     "---",
@@ -1665,16 +1908,16 @@ def _branching_session(tmp: Path):
     return session, target.id, old_leaf.id
 
 
-def _write_plugin_manifest(plugin_root: Path, *, plugin_id: str, skills=None) -> None:
-    plugin_root.mkdir(parents=True, exist_ok=True)
+def _write_codex_plugin_manifest(plugin_root: Path, *, name: str, skills) -> None:
+    manifest_dir = plugin_root / ".codex-plugin"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "id": plugin_id,
-        "name": plugin_id,
+        "name": name,
         "version": "1.0.0",
-        "description": "Test plugin",
-        "skills": [{"path": "skills"}] if skills is None else skills,
+        "description": "Codex style test plugin",
+        "skills": skills,
     }
-    (plugin_root / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (manifest_dir / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _stream_content(calls, content):
