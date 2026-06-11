@@ -18,6 +18,12 @@ from .state import AppStateStore
 LongTermBuilder = Callable[[Path], Any]
 
 
+def _configure_logging_once() -> None:
+    """配置日志（幂等，只在首次调用时生效）。"""
+    from cli_app.logging_config import configure_logging
+    configure_logging()
+
+
 @dataclass
 class AppRuntime:
     cwd: Path
@@ -41,6 +47,7 @@ class AppRuntime:
         long_term_builder: LongTermBuilder | None = None,
         event_bus: EventBus | None = None,
     ) -> "AppRuntime":
+        _configure_logging_once()
         project_cwd = Path(cwd)
         store = session_store or SessionStore()
         memory = long_term_memory

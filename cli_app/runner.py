@@ -15,7 +15,6 @@ from sessions.summarizer import generate_branch_summary
 from .commands import parse_plan_command
 from .constants import BANNER
 from .factories import build_agent, build_long_term_memory, build_registry, list_tools
-from .logging_config import configure_logging
 from .router import ReplRouter
 from .terminal_input import build_prompt
 from ui import Renderer, TerminalRenderer
@@ -83,7 +82,6 @@ def _run_agent_events(
 def repl(renderer: Renderer | None = None) -> int:
     renderer = renderer or TerminalRenderer()
     load_dotenv()
-    configure_logging()
     cwd = Path.cwd()
     app_runtime = AppRuntime.create(
         cwd,

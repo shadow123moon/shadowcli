@@ -1322,7 +1322,7 @@ class CliAgentTests(unittest.TestCase):
         import cli_app.runner as runner
         with (
             patch("cli_app.runner.load_dotenv"),
-            patch("cli_app.runner.configure_logging"),
+            patch("app_runtime.runtime._configure_logging_once"),
             patch("cli_app.runner.build_registry", return_value=runtime),
             patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
             patch("cli_app.runner.SessionStore", return_value=_StubSessionStore()),
@@ -1803,7 +1803,7 @@ class CliAgentTests(unittest.TestCase):
             import cli_app.runner as runner
             with (
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -1828,7 +1828,7 @@ class CliAgentTests(unittest.TestCase):
             import cli_app.runner as runner
             with (
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -1851,7 +1851,7 @@ class CliAgentTests(unittest.TestCase):
             import cli_app.runner as runner
             with (
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -1876,7 +1876,7 @@ class CliAgentTests(unittest.TestCase):
             import cli_app.runner as runner
             with (
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -1907,7 +1907,7 @@ class CliAgentTests(unittest.TestCase):
             import cli_app.runner as runner
             with (
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -1941,7 +1941,7 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"PAICLI_COMPACT_MAX_TOKENS": "1"}, clear=False),
                 patch("cli_app.runner.load_dotenv"),
-                patch("cli_app.runner.configure_logging"),
+                patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=TextLongTermMemory(Path(tmp) / "long_term.md")),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
@@ -2062,8 +2062,8 @@ class CliAgentTests(unittest.TestCase):
         errors = io.StringIO()
 
         with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
-            os.environ["PAICLI_LOG_LEVEL"] = "INFO"
-            os.environ.pop("PAICLI_DEBUG_LOG", None)
+            os.environ["SHADOWCLI_LOG_LEVEL"] = "INFO"
+            os.environ.pop("SHADOWCLI_DEBUG_LOG", None)
             with contextlib.redirect_stderr(errors):
                 cli.configure_logging()
                 logging.getLogger("ddgs").info("response: https://example.test 200")

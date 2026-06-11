@@ -1,5 +1,6 @@
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
@@ -7,6 +8,7 @@ _CONSOLE_HANDLER_ATTR = "_shadowcli_console_handler"
 _CONSOLE_NOISY_FILTER_ATTR = "_shadowcli_console_noisy_filter"
 _DEBUG_HANDLER_ATTR = "_shadowcli_debug_handler"
 _NOISY_LOGGERS = (
+    "markdown_it",
     "ddgs",
     "duckduckgo_search",
     "httpx",
@@ -22,7 +24,7 @@ CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 
 
 def configure_logging(debug_log_path: str | Path | None = None) -> None:
-    level_name = os.getenv("PAICLI_LOG_LEVEL", "WARNING").upper()
+    level_name = os.getenv("SHADOWCLI_LOG_LEVEL", "WARNING").upper()
     console_level = getattr(logging, level_name, logging.WARNING)
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
@@ -58,7 +60,7 @@ def _resolve_debug_log_path(debug_log_path: str | Path | None) -> Path | None:
     if debug_log_path is not None:
         return Path(debug_log_path)
 
-    env_value = os.getenv("PAICLI_DEBUG_LOG")
+    env_value = os.getenv("SHADOWCLI_DEBUG_LOG")
     if not env_value:
         return None
     if env_value.lower() in {"1", "true", "yes", "on"}:
@@ -86,7 +88,12 @@ def _install_debug_file_handler(root_logger: logging.Logger, path: Path) -> None
         root_logger.removeHandler(existing)
         existing.close()
 
-    handler = logging.FileHandler(path, encoding="utf-8")
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=3,
+        encoding="utf-8"
+    )
     setattr(handler, _DEBUG_HANDLER_ATTR, True)
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
