@@ -30,12 +30,20 @@ def chat(
         model: str | None = None,
         api_key: str | None = None,
         api_url: str | None = None,
+        extra_headers: dict[str, str] | None = None,
 
 ) -> ChatResponse:
     """Call an OpenAI-compatible chat completion API."""
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     api_url = api_url or os.environ.get("API_URL")
     model = model or os.environ.get("MODEL")
+
+    if extra_headers is None:
+        extra_headers = {}
+        if ua := os.environ.get("HTTP_USER_AGENT"):
+            extra_headers["User-Agent"] = ua
+        if referer := os.environ.get("HTTP_REFERER"):
+            extra_headers["Referer"] = referer
 
     if not api_url:
         raise ValueError("API_URL 未配置，请设置环境变量或传入参数")
@@ -57,6 +65,8 @@ def chat(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    if extra_headers:
+        headers.update(extra_headers)
 
     resp = requests.post(api_url, headers=headers, json=body)
     resp.raise_for_status()
@@ -70,11 +80,19 @@ def chat_stream(
     api_key: str | None = None,
     api_url: str | None = None,
     cancel: threading.Event | None = None,
+    extra_headers: dict[str, str] | None = None,
 ):
     """纯流式，yield StreamEvent。支持 cancel 实时中断。"""
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     api_url = api_url or os.environ.get("API_URL")
     model = model or os.environ.get("MODEL")
+
+    if extra_headers is None:
+        extra_headers = {}
+        if ua := os.environ.get("HTTP_USER_AGENT"):
+            extra_headers["User-Agent"] = ua
+        if referer := os.environ.get("HTTP_REFERER"):
+            extra_headers["Referer"] = referer
 
     if not api_url:
         raise ValueError("API_URL 未配置，请设置环境变量或传入参数")
@@ -83,7 +101,11 @@ def chat_stream(
     if not model:
         raise ValueError("MODEL 未配置，请设置环境变量或传入参数")
 
-    client = OpenAI(api_key=api_key, base_url=api_url)
+    client = OpenAI(
+        api_key=api_key,
+        base_url=api_url,
+        default_headers=extra_headers or {},
+    )
     create_kwargs = {
         "model": model,
         "messages": [_message_to_dict(m) for m in messages],
