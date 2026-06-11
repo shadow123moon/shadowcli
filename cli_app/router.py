@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from agent import ReactAgent
+from app_runtime import AppRuntime
 from llm import chat as default_chat
-from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore, compact_session
+from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
-from plugin_runtime import PluginManager, PluginStateStore
 from skills import (
     SkillContextBuilder,
-    SkillRegistry,
     SkillSelection,
     SkillSelector,
-    auto_skills_enabled,
     skill_reference,
 )
 from .commands import (
@@ -47,7 +44,6 @@ from ui import (
     ask_branch_navigation_choice,
 )
 
-log = logging.getLogger("cli_app.runner")
 DEFAULT_SKILL_TASK = "按 skill 指令执行"
 
 
@@ -74,63 +70,28 @@ def navigate_session_branch(
     return choice
 
 
-def reload_agent_conversation(agent: ReactAgent, session: SessionManager) -> None:
-    if hasattr(agent, "replace_conversation_messages"):
-        agent.replace_conversation_messages(session.messages())
-
-
-def maybe_compact_before_run(
-    session: SessionManager,
-    agent: ReactAgent,
-    long_term: Any,
-    runtime_context_builder: RuntimeContextBuilder,
-    renderer: Renderer,
-    *,
-    chat_fn: Callable[..., Any] = default_chat,
-) -> RuntimeContextBuilder:
-    try:
-        result = compact_session(session, force=False, chat_fn=chat_fn)
-    except Exception as e:
-        log.exception("[会话压缩] 自动压缩失败")
-        renderer.message(f"[WARN] 自动压缩失败，继续使用未压缩上下文: {e}")
-        return runtime_context_builder
-
-    if not result.compacted:
-        return runtime_context_builder
-
-    reload_agent_conversation(agent, session)
-    renderer.message(format_compaction_result(result))
-    return RuntimeContextBuilder(session=session, long_term=long_term)
-
-
 class ReplRouter:
     def __init__(
         self,
         *,
-        runtime: Any,
-        cwd: Path,
-        session_store: SessionStore,
-        long_term: Any,
+        app_runtime: AppRuntime,
         renderer: Renderer,
         build_agent: Callable[..., ReactAgent],
         run_agent_once: Callable[..., None],
         list_tools: Callable[[Any], str] = default_list_tools,
-        skill_registry: SkillRegistry | None = None,
-        skill_registry_builder: Callable[[Path], SkillRegistry] | None = None,
         skill_selector: SkillSelector | None = None,
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
     ) -> None:
-        self.runtime = runtime
-        self.cwd = cwd
-        self.session_store = session_store
-        self.long_term = long_term
+        self.app_runtime = app_runtime
+        self.runtime = app_runtime.tool_runtime
+        self.cwd = app_runtime.cwd
+        self.session_store = app_runtime.session_store
+        self.long_term = app_runtime.long_term_memory
         self.renderer = renderer
         self.build_agent = build_agent
         self.run_agent_once = run_agent_once
         self.list_tools = list_tools
-        self.skill_registry_builder = skill_registry_builder or (lambda path: SkillRegistry(path))
-        self.skill_registry = skill_registry or self.skill_registry_builder(cwd)
         self.skill_selector = skill_selector
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
@@ -159,7 +120,7 @@ class ReplRouter:
             self._handle_plugin(*plugin_input)
             return True
         if parse_skills_command(line):
-            self.renderer.message(format_skill_list(self.skill_registry.list()))
+            self.renderer.message(format_skill_list(self.app_runtime.skill_registry.list()))
             return True
         skill_input = parse_skill_command(line)
         if skill_input is not None:
@@ -262,11 +223,14 @@ class ReplRouter:
         ):
             self.renderer.message(_no_active_session_message())
             return
-        result = compact_session(self.session, force=True, chat_fn=self.chat_fn)
-        if result.compacted:
-            reload_agent_conversation(self.agent, self.session)
-            self.runtime_context_builder = RuntimeContextBuilder(session=self.session, long_term=self.long_term)
-        self.renderer.message(format_compaction_result(result))
+        prepared = self.app_runtime.compact_agent_session(
+            self.session,
+            self.agent,
+            chat_fn=self.chat_fn,
+        )
+        self.runtime_context_builder = prepared.context_builder
+        if prepared.compaction_result is not None:
+            self.renderer.message(format_compaction_result(prepared.compaction_result))
 
     def _handle_jump(self, jump_target: str) -> None:
         if not self.ensure_existing_session() or self.session is None or self.agent is None:
@@ -281,81 +245,64 @@ class ReplRouter:
         if not plan_input:
             self.renderer.message("用法: /plan <任务>")
             return
-        self._run_agent_line(line)
+        self._run_agent_line(line, allow_auto_skill=False)
 
     def _handle_plugins(self) -> None:
-        manager = PluginManager(self.cwd)
-        self.renderer.message(format_plugin_list(manager.list_plugins(), manager.diagnostics()))
+        plugins, diagnostics = self.app_runtime.plugin_status()
+        self.renderer.message(format_plugin_list(plugins, diagnostics))
 
     def _handle_plugin(self, action: str, name: str) -> None:
         if action not in {"enable", "disable"} or not name:
             self.renderer.message("用法: /plugin enable|disable <name>")
             return
 
-        manager = PluginManager(self.cwd)
-        known = {plugin.manifest.id for plugin in manager.list_plugins()}
-        if name not in known:
+        if not self.app_runtime.set_plugin_enabled(name, action == "enable"):
             self.renderer.message(f"未找到插件: {name}")
             return
 
-        state = PluginStateStore(self.cwd)
         if action == "enable":
-            state.enable(name)
             self.renderer.message(f"已启用插件: {name}")
         else:
-            state.disable(name)
             self.renderer.message(f"已禁用插件: {name}")
-        self.skill_registry = self.skill_registry_builder(self.cwd)
 
     def _handle_skill(self, name: str, task: str) -> None:
         if not name:
             self.renderer.message("用法: /skill <name> [任务]")
             return
+
+        active_session, active_agent, context_builder = self.ensure_session()
+        self.runtime_context_builder = self._prepare_agent_run(
+            active_session,
+            active_agent,
+            context_builder,
+        )
+        agent_task = task or DEFAULT_SKILL_TASK
         try:
-            loaded_skill = self.skill_registry.load(name)
+            run_context_builder = self._build_skill_context(name, self.runtime_context_builder, arguments=task)
         except KeyError:
             self.renderer.message(f"未找到 skill: {name}")
             return
-
-        active_session, active_agent, context_builder = self.ensure_session()
-        self.runtime_context_builder = maybe_compact_before_run(
-            active_session,
-            active_agent,
-            self.long_term,
-            context_builder,
-            self.renderer,
-            chat_fn=self.chat_fn,
-        )
-        agent_task = task or DEFAULT_SKILL_TASK
         self.run_agent_once(
             active_agent,
             agent_task,
-            runtime_context_builder=SkillContextBuilder(
-                base=self.runtime_context_builder,
-                skill=loaded_skill,
-                arguments=task,
-            ),
+            runtime_context_builder=run_context_builder,
             renderer=self.renderer,
         )
 
-    def _run_agent_line(self, line: str) -> None:
-        selection = self._select_auto_skill(line)
+    def _run_agent_line(self, line: str, *, allow_auto_skill: bool = True) -> None:
+        selection = self._select_auto_skill(line) if allow_auto_skill else None
         active_session, active_agent, context_builder = self.ensure_session()
-        self.runtime_context_builder = maybe_compact_before_run(
+        self.runtime_context_builder = self._prepare_agent_run(
             active_session,
             active_agent,
-            self.long_term,
             context_builder,
-            self.renderer,
-            chat_fn=self.chat_fn,
         )
         run_context_builder: RuntimeContextBuilder | SkillContextBuilder = self.runtime_context_builder
         if selection is not None and selection.skill is not None:
-            loaded_skill = self.skill_registry.load_definition(selection.skill)
             self.renderer.message(_format_auto_skill_selection(selection))
-            run_context_builder = SkillContextBuilder(
-                base=self.runtime_context_builder,
-                skill=loaded_skill,
+            run_context_builder = self._build_skill_context_for_definition(
+                selection.skill,
+                self.runtime_context_builder,
                 arguments=line,
             )
         self.run_agent_once(
@@ -366,14 +313,47 @@ class ReplRouter:
         )
 
     def _select_auto_skill(self, line: str) -> SkillSelection | None:
-        if not auto_skills_enabled():
-            return None
+        return self.app_runtime.select_auto_skill(
+            line,
+            selector=self.skill_selector,
+            chat_fn=self.chat_fn,
+        )
 
-        selector = self.skill_selector or SkillSelector(self.skill_registry, chat_fn=self.chat_fn)
-        selection = selector.select(line)
-        if selection is None or selection.skill is None:
-            return None
-        return selection
+    def _build_skill_context(
+        self,
+        name: str,
+        base: RuntimeContextBuilder,
+        *,
+        arguments: str,
+    ) -> SkillContextBuilder:
+        return self.app_runtime.build_skill_context(name, base, arguments=arguments)
+
+    def _build_skill_context_for_definition(
+        self,
+        skill: Any,
+        base: RuntimeContextBuilder,
+        *,
+        arguments: str,
+    ) -> SkillContextBuilder:
+        return self.app_runtime.build_skill_context_for_definition(skill, base, arguments=arguments)
+
+    def _prepare_agent_run(
+        self,
+        session: SessionManager,
+        agent: ReactAgent,
+        context_builder: RuntimeContextBuilder,
+    ) -> RuntimeContextBuilder:
+        prepared = self.app_runtime.prepare_agent_run(
+            session,
+            agent,
+            context_builder,
+            chat_fn=self.chat_fn,
+        )
+        if prepared.warning:
+            self.renderer.message(prepared.warning)
+        if prepared.compaction_result is not None and prepared.compaction_result.compacted:
+            self.renderer.message(format_compaction_result(prepared.compaction_result))
+        return prepared.context_builder
 
     def _navigate_to(self, target_id: str) -> None:
         assert self.session is not None
@@ -390,8 +370,9 @@ class ReplRouter:
             return
 
         if choice != BranchNavigationChoice.CANCEL:
-            reload_agent_conversation(self.agent, self.session)
-            self.runtime_context_builder = RuntimeContextBuilder(session=self.session, long_term=self.long_term)
+            if hasattr(self.agent, "replace_conversation_messages"):
+                self.agent.replace_conversation_messages(self.session.messages())
+            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
             self.renderer.message(f"已跳转到: {self.session.get_leaf_id()}")
         else:
             self.renderer.message("已取消跳转。")

@@ -41,7 +41,7 @@ from .factories import (
     list_tools,
 )
 from .logging_config import configure_logging
-from .runner import navigate_session_branch, repl, run_once
+from .runner import repl, run_once
 
 __all__ = [
     "BANNER",
@@ -81,7 +81,6 @@ __all__ = [
     "format_skill_list",
     "format_session_tree",
     "format_compaction_result",
-    "navigate_session_branch",
     "run_once",
     "repl",
 ]

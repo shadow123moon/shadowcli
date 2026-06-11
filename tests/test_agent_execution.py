@@ -15,10 +15,18 @@ import cli_app as cli
 from agent.agent_loop import AgentLoop
 from agent.prompts import react_agent_prompt
 from agent.react_agent import ReactAgent
+from app_runtime import AppRuntime
 from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
-from sessions import BranchSummaryEntry, CompactionEntry, RuntimeContextBuilder, SessionStore, TextLongTermMemory
+from sessions import (
+    BranchSummaryEntry,
+    CompactionEntry,
+    CompactionResult,
+    RuntimeContextBuilder,
+    SessionStore,
+    TextLongTermMemory,
+)
 from skills import SkillDefinition, SkillRegistry, SkillRoot, SkillSelection, SkillSelector
 from plugin_runtime import PluginManager, PluginStateStore
 from tooling import (
@@ -471,15 +479,17 @@ class PluginManagerTests(unittest.TestCase):
             )
             manager = PluginManager(cwd)
 
-            repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
                 session_store=_FailingSessionStore(),
-                long_term=_StubLongTermMemory(),
+                long_term_memory=_StubLongTermMemory(),
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
                 run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
-                skill_registry=SkillRegistry(cwd, extra_roots=manager.skill_roots()),
             )
 
             keep_running = repl_router.route("/skills")
@@ -688,6 +698,55 @@ class PluginManagerTests(unittest.TestCase):
             self.assertEqual(manager.skill_roots(), [
                 SkillRoot(source="plugin:superpowers", path=skill_root.resolve()),
             ])
+
+
+class AppRuntimeTests(unittest.TestCase):
+    def test_app_runtime_collects_core_runtime_resources(self):
+        from app_runtime import AppRuntime, AppStateStore, EventBus, HookManager, SessionRuntime, SkillManager
+
+        tool_runtime = ToolRuntime(ToolRegistry())
+        session_store = _StubSessionStore()
+        long_term = _StubLongTermMemory()
+        event_bus = EventBus()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=tool_runtime,
+                session_store=session_store,
+                long_term_memory=long_term,
+                event_bus=event_bus,
+            )
+
+        self.assertIs(app.tool_runtime, tool_runtime)
+        self.assertIs(app.session_store, session_store)
+        self.assertIs(app.long_term_memory, long_term)
+        self.assertIs(app.event_bus, event_bus)
+        self.assertIsInstance(app.state_store, AppStateStore)
+        self.assertIsInstance(app.hook_manager, HookManager)
+        self.assertIs(app.hook_manager.event_bus, event_bus)
+        self.assertEqual(len(app.tool_runtime.before_execute_hooks), 1)
+        self.assertIsInstance(app.session_runtime, SessionRuntime)
+        self.assertIs(app.session_runtime.long_term_memory, long_term)
+        self.assertIsInstance(app.skill_manager, SkillManager)
+        self.assertIs(app.skill_manager.state_store, app.state_store)
+        self.assertIsInstance(app.plugin_manager, PluginManager)
+        self.assertIs(app.plugin_manager, app.skill_manager.plugin_manager)
+        self.assertIsInstance(app.skill_registry, SkillRegistry)
+        self.assertIs(app.skill_registry, app.skill_manager.registry)
+
+    def test_event_bus_publishes_subscribed_handlers_in_order(self):
+        from app_runtime import EventBus
+
+        events = []
+        bus = EventBus()
+        bus.subscribe("skills.refreshed", lambda event: events.append(("first", event.payload["count"])))
+        bus.subscribe("skills.refreshed", lambda event: events.append(("second", event.payload["count"])))
+
+        event = bus.publish("skills.refreshed", count=2)
+
+        self.assertEqual(event.type, "skills.refreshed")
+        self.assertEqual(events, [("first", 2), ("second", 2)])
 
 
 class ReactAgentTests(unittest.TestCase):
@@ -1300,11 +1359,14 @@ class CliAgentTests(unittest.TestCase):
             )
             session_store = _FailingSessionStore()
 
-            repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
                 session_store=session_store,
-                long_term=_StubLongTermMemory(),
+                long_term_memory=_StubLongTermMemory(),
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
                 run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
@@ -1318,7 +1380,6 @@ class CliAgentTests(unittest.TestCase):
         self.assertTrue(any("project" in message for message in renderer.messages))
 
     def test_repl_plugin_enable_refreshes_skills(self):
-        import cli_app.runner as runner
         import cli_app.router as router
 
         runtime = ToolRuntime(ToolRegistry())
@@ -1342,15 +1403,17 @@ class CliAgentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
                 session_store=_FailingSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: self.fail("/plugin 不应创建 agent"),
                 run_agent_once=lambda *args, **kwargs: self.fail("/plugin 不应运行 agent"),
-                skill_registry_builder=runner.build_skill_registry,
             )
 
             keep_running = repl_router.route("/plugins")
@@ -1389,11 +1452,14 @@ class CliAgentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
                 session_store=_StubSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
@@ -1432,11 +1498,14 @@ class CliAgentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
                 session_store=_StubSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
@@ -1458,11 +1527,14 @@ class CliAgentTests(unittest.TestCase):
         renderer = _CaptureRenderer()
 
         with tempfile.TemporaryDirectory() as tmp:
-            repl_router = router.ReplRouter(
-                runtime=ToolRuntime(ToolRegistry()),
-                cwd=Path(tmp),
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=ToolRuntime(ToolRegistry()),
                 session_store=_StubSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
@@ -1524,20 +1596,21 @@ class CliAgentTests(unittest.TestCase):
                 description="Review code changes for bugs.",
                 body="Review `$ARGUMENTS` and report concrete risks.",
             )
-            registry = SkillRegistry(cwd)
-            skill = registry.find("code-review")
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=runtime,
+                session_store=_StubSessionStore(),
+                long_term_memory=[],
+            )
+            skill = app.skill_registry.find("code-review")
             self.assertIsNotNone(skill)
             selector = _FixedSkillSelector(SkillSelection(skill, "任务是在执行代码审查"))
 
             repl_router = router.ReplRouter(
-                runtime=runtime,
-                cwd=cwd,
-                session_store=_StubSessionStore(),
-                long_term=[],
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
-                skill_registry=registry,
                 skill_selector=selector,
             )
 
@@ -1563,11 +1636,14 @@ class CliAgentTests(unittest.TestCase):
         selector = _FixedSkillSelector(SkillSelection(None, "没有明确匹配"))
 
         with tempfile.TemporaryDirectory() as tmp:
-            repl_router = router.ReplRouter(
-                runtime=ToolRuntime(ToolRegistry()),
-                cwd=Path(tmp),
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=ToolRuntime(ToolRegistry()),
                 session_store=_StubSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
@@ -1582,6 +1658,43 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(agent.inputs, [("随便聊聊", "")])
         self.assertFalse(any("自动加载 skill:" in message for message in renderer.messages))
 
+    def test_repl_plan_command_skips_auto_skill_selector(self):
+        import cli_app.router as router
+
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+        skill = SkillDefinition(
+            name="planning-helper",
+            description="Help plan work.",
+            path=Path("SKILL.md"),
+            directory_name="planning-helper",
+        )
+        selector = _FixedSkillSelector(SkillSelection(skill, "不应调用"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=ToolRuntime(ToolRegistry()),
+                session_store=_StubSessionStore(),
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
+                renderer=renderer,
+                build_agent=lambda *args, **kwargs: agent,
+                run_agent_once=cli.run_once,
+                skill_selector=selector,
+            )
+
+            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+                keep_running = repl_router.route("/plan 梳理 runtime 架构")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(selector.inputs, [])
+        self.assertEqual(len(agent.inputs), 1)
+        self.assertIn("单 Agent 计划执行模式", agent.inputs[0][0])
+        self.assertNotIn("## 当前 Skill", agent.inputs[0][1])
+
     def test_repl_auto_skill_selector_is_disabled_by_default(self):
         import cli_app.router as router
 
@@ -1590,11 +1703,14 @@ class CliAgentTests(unittest.TestCase):
         selector = _FixedSkillSelector(SkillSelection(None, "不应调用"))
 
         with tempfile.TemporaryDirectory() as tmp:
-            repl_router = router.ReplRouter(
-                runtime=ToolRuntime(ToolRegistry()),
-                cwd=Path(tmp),
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=ToolRuntime(ToolRegistry()),
                 session_store=_StubSessionStore(),
-                long_term=[],
+                long_term_memory=[],
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
                 renderer=renderer,
                 build_agent=lambda *args, **kwargs: agent,
                 run_agent_once=cli.run_once,
@@ -1609,8 +1725,6 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(agent.inputs, [("普通输入", "")])
 
     def test_auto_skill_selector_excludes_disabled_plugin_skills(self):
-        import cli_app.runner as runner
-
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp)
             _write_skill_file(
@@ -1633,8 +1747,14 @@ class CliAgentTests(unittest.TestCase):
                 prompts.extend(message.content or "" for message in messages)
                 return ChatResponse(content='{"skill": null, "reason": "no clear match"}')
 
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=ToolRuntime(ToolRegistry()),
+                session_store=_StubSessionStore(),
+                long_term_memory=[],
+            )
             selection = SkillSelector(
-                runner.build_skill_registry(cwd),
+                app.skill_registry,
                 chat_fn=fake_chat,
             ).select("我要加一个新功能")
 
@@ -1644,9 +1764,7 @@ class CliAgentTests(unittest.TestCase):
         self.assertNotIn("brainstorming", prompt)
         self.assertNotIn("superpowers:brainstorming", prompt)
 
-    def test_runner_skill_registry_loads_manifest_declared_plugin_skills(self):
-        import cli_app.runner as runner
-
+    def test_app_runtime_skill_registry_loads_manifest_declared_plugin_skills(self):
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp)
             plugin_root = cwd / "plugins" / "superpowers"
@@ -1666,7 +1784,13 @@ class CliAgentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            registry = runner.build_skill_registry(cwd)
+            app = AppRuntime.create(
+                cwd,
+                tool_runtime=ToolRuntime(ToolRegistry()),
+                session_store=_StubSessionStore(),
+                long_term_memory=[],
+            )
+            registry = app.skill_registry
             skill = registry.find("brainstorming")
 
         self.assertIsNotNone(skill)
@@ -1985,12 +2109,12 @@ class CliAgentTests(unittest.TestCase):
             self.assertEqual(len(memory), 0)
 
     def test_navigate_session_branch_direct_choice_moves_leaf_without_summary(self):
-        import cli_app.runner as runner
+        import cli_app.router as router
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, old_leaf_id = _branching_session(Path(tmp))
 
-            result = runner.navigate_session_branch(
+            result = router.navigate_session_branch(
                 session,
                 target_id,
                 choose_navigation=lambda plan: BranchNavigationChoice.DIRECT,
@@ -2003,13 +2127,13 @@ class CliAgentTests(unittest.TestCase):
             self.assertIn(old_leaf_id, {entry.id for entry in session.all_entries()})
 
     def test_navigate_session_branch_summary_choice_appends_branch_summary(self):
-        import cli_app.runner as runner
+        import cli_app.router as router
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, old_leaf_id = _branching_session(Path(tmp))
             seen = []
 
-            result = runner.navigate_session_branch(
+            result = router.navigate_session_branch(
                 session,
                 target_id,
                 choose_navigation=lambda plan: BranchNavigationChoice.SUMMARIZE,
@@ -2025,12 +2149,12 @@ class CliAgentTests(unittest.TestCase):
             self.assertEqual([entry.content for entry in [e.message for e in seen[0].leaving_entries]], ["旧分支问题"])
 
     def test_navigate_session_branch_cancel_choice_keeps_current_leaf(self):
-        import cli_app.runner as runner
+        import cli_app.router as router
 
         with tempfile.TemporaryDirectory() as tmp:
             session, target_id, old_leaf_id = _branching_session(Path(tmp))
 
-            result = runner.navigate_session_branch(
+            result = router.navigate_session_branch(
                 session,
                 target_id,
                 choose_navigation=lambda plan: BranchNavigationChoice.CANCEL,
@@ -2128,7 +2252,11 @@ class _StaticRuntimeContextBuilder:
 
 
 class _StubLongTermMemory:
-    pass
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
 
 
 class _StubSession:
@@ -2487,7 +2615,12 @@ class PiStyleToolTests(unittest.TestCase):
             self.assertIn("Python", bash_out)
 
     def test_cli_registry_exposes_only_canonical_tool_names(self):
-        registry = cli.build_registry()
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+            )
+            registry = app.tool_runtime
         names = [d["function"]["name"] for d in registry.get_all_definitions()]
 
         for name in ["read", "write", "edit", "bash", "ls", "grep", "find", "web_search", "web_fetch"]:

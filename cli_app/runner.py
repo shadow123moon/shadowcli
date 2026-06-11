@@ -6,34 +6,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from agent import ReactAgent
+from app_runtime import AppRuntime
 from llm import chat
 from mcp_integration import load_mcp_config, McpServerManager, McpToolWrapper
 from plugin_runtime import PluginManager
 from sessions import RuntimeContextBuilder, SessionStore
 from sessions.summarizer import generate_branch_summary
-from skills import SkillRegistry
 from .commands import parse_plan_command
 from .constants import BANNER
 from .factories import build_agent, build_long_term_memory, build_registry, list_tools
 from .logging_config import configure_logging
-from .router import (
-    ReplRouter,
-    maybe_compact_before_run,
-    navigate_session_branch,
-    reload_agent_conversation,
-)
+from .router import ReplRouter
 from .terminal_input import build_prompt
 from ui import Renderer, TerminalRenderer
 
 log = logging.getLogger(__name__)
-
-
-def build_skill_registry(cwd: Path | str) -> SkillRegistry:
-    plugin_manager = PluginManager(cwd)
-    skill_roots = plugin_manager.skill_roots()
-    for diagnostic in plugin_manager.diagnostics():
-        log.warning("[插件] %s: %s", diagnostic.plugin_path, diagnostic.message)
-    return SkillRegistry(cwd, extra_roots=skill_roots)
 
 
 def run_once(
@@ -97,28 +84,26 @@ def repl(renderer: Renderer | None = None) -> int:
     renderer = renderer or TerminalRenderer()
     load_dotenv()
     configure_logging()
-    runtime = build_registry()
     cwd = Path.cwd()
-    session_store = SessionStore()
-    long_term = build_long_term_memory(session_store.project_dir(cwd) / "long_term.md")
-    skill_registry = build_skill_registry(cwd)
+    app_runtime = AppRuntime.create(
+        cwd,
+        tool_runtime=build_registry(),
+        session_store=SessionStore(),
+        long_term_builder=build_long_term_memory,
+    )
+    _log_plugin_diagnostics(app_runtime.plugin_manager)
 
     mcp_manager = McpServerManager()
     try:
-        mcp_loaded, mcp_failed = _load_mcp_tools(runtime, mcp_manager)
+        mcp_loaded, mcp_failed = _load_mcp_tools(app_runtime.tool_runtime, mcp_manager)
         _render_mcp_status(renderer, mcp_loaded=mcp_loaded, mcp_failed=mcp_failed)
 
         router = ReplRouter(
-            runtime=runtime,
-            cwd=cwd,
-            session_store=session_store,
-            long_term=long_term,
+            app_runtime=app_runtime,
             renderer=renderer,
             build_agent=build_agent,
             run_agent_once=run_once,
             list_tools=list_tools,
-            skill_registry=skill_registry,
-            skill_registry_builder=build_skill_registry,
             chat_fn=chat,
             build_branch_summary=generate_branch_summary,
         )
@@ -139,6 +124,11 @@ def repl(renderer: Renderer | None = None) -> int:
         mcp_manager.shutdown()
 
     return 0
+
+
+def _log_plugin_diagnostics(plugin_manager: PluginManager) -> None:
+    for diagnostic in plugin_manager.diagnostics():
+        log.warning("[插件] %s: %s", diagnostic.plugin_path, diagnostic.message)
 
 
 def _load_mcp_tools(runtime, mcp_manager: McpServerManager) -> tuple[int, int]:

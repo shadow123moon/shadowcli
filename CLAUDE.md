@@ -28,7 +28,7 @@ D:\paicli-main\paicli-main\           ← Java 源码
 | 1+2 | `agent/` `plan/` `tool/` `llm/` | `cli_app/` `agent/` `tooling/` `llm/` | 主路径已接入,持续维护 |
 | 3 | `memory/` | `sessions/long_term.py` (`long_term.md` 文本事实清单) | 已瘦身为项目级 markdown 记忆 |
 | 4 | `rag/` | — | 已放弃；本地项目检索改用 read/grep/find/ls |
-| 6+ | hitl / runtime / skill | `extensions/tool_runtime.py` `plugin_runtime/` `skills/` `cli_app/` | HITL 与工具运行时已接入；skill 命令化、插件 manifest 入口和默认关闭的隐式 skill 选择已接入 |
+| 6+ | hitl / runtime / skill | `app_runtime/` `extensions/tool_runtime.py` `plugin_runtime/` `skills/` `cli_app/` | HITL 与工具运行时已接入；skill 命令化、插件 manifest 入口、默认关闭的隐式 skill 选择、AppRuntime 资源组装、HookManager 工具 hook 层、AppStateStore 状态层、SessionRuntime 会话层和 SkillManager 能力层已接入 |
 | 6+ | tui / mcp / lsp / snapshot | — | 未接入主路径 |
 
 ## 近期演进顺序
@@ -40,6 +40,7 @@ D:\paicli-main\paicli-main\           ← Java 源码
 阶段 4: 市面 skill/plugin 格式适配，已完成
 阶段 5: 插件启用/禁用/状态管理，已完成
 阶段 6: 从命令化 skill 升级到可解释的隐式 skill 选择，已完成最小版
+运行期收拢: AppRuntime + EventBus + HookManager + AppStateStore + SessionRuntime + SkillManager，已完成前五片
 阶段 7: hooks / MCP server / runtime extension contributions
 ```
 
@@ -48,6 +49,8 @@ D:\paicli-main\paicli-main\           ← Java 源码
 阶段 5 的边界：做 `/plugins`、`/plugin enable <name>`、`/plugin disable <name>`、项目级 `.agents/plugins.json` 启用状态、插件默认禁用、enabled 插件 skill 注入、`plugin:skill` 显式命名空间调用；不在这一阶段实现插件安装卸载、hooks、MCP server、runtime extension 或自动 skill 匹配。
 
 阶段 6 的边界：`PAICLI_AUTO_SKILLS=1` 时，普通输入前用 LLM selector 在 project skills 和 enabled plugin skills 中选择 0/1 个 skill；selector 只看 `name/source/description/argument_hint` metadata，不读取完整 `SKILL.md`；命中时终端打印自动加载的 skill 和原因。默认关闭，不做多 skill 链式加载、向量库、长期偏好学习或自动启用插件。
+
+运行期收拢的边界：`app_runtime/` 负责创建、持有和刷新运行期资源。`AppRuntime` 做总装和对外门面；`HookManager` 负责默认工具 hooks 的安装与桥接；`AppStateStore` 统一项目级运行期状态入口，当前承接插件启用状态；`SessionRuntime` 承接运行前上下文准备、手动 `/compact`、agent conversation 重载和 RuntimeContextBuilder 重建；`SkillManager` 组合 `PluginManager`/`SkillRegistry`，承接插件启用/禁用、自动 skill 选择、skill context 组装这类 skill 能力动作；不接管 `SessionStore`、`TextLongTermMemory`、`PluginManager`、`SkillRegistry` 或 `ToolRuntime` 的内部业务逻辑。后续插件贡献的 hooks、MCP server、runtime extension contributions 应优先挂到这个运行期入口，而不是继续散落在 runner/router 里。
 
 ## 运行 / 测试
 

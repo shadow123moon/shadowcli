@@ -28,7 +28,7 @@ python -m cli_app
 /quit               退出
 ```
 
-`main.py`、`core.py`、`cli.py` 不再作为入口。后续新增能力优先接到 `cli_app/` 的命令路由；工具执行期扩展接 `ToolRuntime`，workflow/skill 类上下文能力接 `skills/`。
+`main.py`、`core.py`、`cli.py` 不再作为入口。后续新增运行期资源优先接到 `app_runtime/`，交互命令接到 `cli_app/`，工具执行期扩展接 `ToolRuntime`，workflow/skill 类上下文能力接 `skills/`。
 
 ## 执行链路
 
@@ -36,6 +36,12 @@ python -m cli_app
 
 ```text
 cli_app
+  -> AppRuntime 持有 ToolRuntime / HookManager / AppStateStore / SessionStore / LongTermMemory / SessionRuntime / SkillManager / EventBus
+  -> HookManager 安装 freshness/HITL/Reviewer 工具 hooks，并桥接到 ToolRuntime
+  -> AppStateStore 统一项目级运行期状态入口
+  -> SessionRuntime 负责压缩、重载 agent conversation、重建 RuntimeContextBuilder
+  -> SkillManager 持有 PluginManager / SkillRegistry
+  -> AppRuntime.prepare_agent_run() 自动压缩并重建 RuntimeContextBuilder
   -> ReactAgent
   -> AgentLoop
   -> ToolRuntime.execute(name, args)
@@ -57,6 +63,8 @@ Skill 初始化：
 
 ```text
 cli_app 启动
+  -> AppRuntime.create()
+  -> SkillManager.create()
   -> PluginManager.skill_roots()
   -> SkillRegistry(extra_roots=...)
 ```
@@ -65,18 +73,44 @@ Skill 命令：
 
 ```text
 cli_app /skill <name> [任务]
+  -> AppRuntime.build_skill_context(name, base_context, arguments)
+  -> SkillManager.build_context(...)
   -> SkillRegistry.load(name)
-  -> SkillContextBuilder
+  -> SkillContextBuilder 注入 skill body
   -> ReactAgent
+```
+
+运行前上下文准备：
+
+```text
+ReplRouter
+  -> AppRuntime.prepare_agent_run(session, agent, context_builder)
+  -> SessionRuntime.prepare_agent_run(...)
+  -> compact_session(force=False)
+  -> 如发生压缩，重载 agent conversation messages
+  -> 返回新的 RuntimeContextBuilder
+```
+
+手动压缩：
+
+```text
+cli_app /compact
+  -> AppRuntime.compact_agent_session(session, agent)
+  -> SessionRuntime.compact_agent_session(...)
+  -> compact_session(force=True)
+  -> 如发生压缩，重载 agent conversation messages
+  -> 返回新的 RuntimeContextBuilder
 ```
 
 自动 skill 选择：
 
 ```text
 普通输入 + PAICLI_AUTO_SKILLS=1
+  -> AppRuntime.select_auto_skill(...)
   -> SkillSelector 只看 project/enabled plugin skill metadata
   -> 选择 0/1 个 skill
-  -> 命中时 SkillContextBuilder 注入 skill body
+  -> 命中时 AppRuntime.build_skill_context_for_definition(...)
+  -> SkillContextBuilder 注入 skill body
   -> ReactAgent 执行原始输入
 ```
 
@@ -93,12 +127,24 @@ PAICLI_PLUGIN_ROOTS=<external plugin root>
   -> SkillRegistry 读取 SKILL.md / skill.md
 ```
 
+插件启用/禁用：
+
+```text
+cli_app /plugin enable|disable <name>
+  -> AppRuntime.set_plugin_enabled(name, enabled)
+  -> AppStateStore.set_plugin_enabled(...)
+  -> PluginStateStore 写入 .agents/plugins.json
+  -> AppRuntime.refresh_skills()
+  -> ReplRouter 更新当前 skill_registry 引用
+```
+
 关键约束：Agent 不直接 `tool.execute(...)`，统一走 `registry.execute(...)`。Agent 只产生事件，`cli_app/runner.py` 把事件路由给 `ui/terminal.py` 渲染，并把消息事实写入 session。
 
 ## 模块职责
 
 | 模块 | 职责 |
 |---|---|
+| `app_runtime/` | 运行期资源组装层，AppRuntime 持有 ToolRuntime、HookManager、AppStateStore、SessionStore、LongTermMemory、SessionRuntime、SkillManager 和 EventBus；HookManager 负责默认工具 hooks 的安装与桥接；AppStateStore 统一项目级运行期状态入口；SessionRuntime 负责运行前/手动上下文压缩、agent conversation 重载和 RuntimeContextBuilder 重建；SkillManager 组合 PluginManager/SkillRegistry，并负责插件启用/禁用后的 skill 刷新、自动 skill 选择和 skill context 组装 |
 | `cli_app/` | 交互入口、命令路由、日志初始化、Agent 事件路由 |
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
@@ -106,7 +152,7 @@ PAICLI_PLUGIN_ROOTS=<external plugin root>
 | `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，管理 `.agents/plugins.json` 启用状态，当前只加载 enabled 插件的 skill contributions |
 | `skills/` | 发现、加载并格式化 `SKILL.md` / `skill.md` 上下文 |
 | `tooling/` | 工具基类、具体工具、工具注册中心 |
-| `extensions/tool_runtime.py` | 工具运行时、before_execute hook、HITL/Reviewer 接入点 |
+| `extensions/tool_runtime.py` | 工具运行时，只执行 before_execute hook 链和 ToolRegistry 调用；默认 hook 安装入口在 AppRuntime/HookManager |
 | `extensions/approval_policy.py` | 工具风险判断 |
 | `llm/` | OpenAI 兼容 Chat API 客户端和消息模型 |
 
@@ -160,7 +206,7 @@ SessionManager                     -> branch_to 或 branch_to_with_summary
 
 ## HITL
 
-HITL 已经接到 `ToolRuntime`，不再有独立的 `HitlToolRegistry` 包装层。
+HITL 已经经 `HookManager` 接到 `ToolRuntime`，不再有独立的 `HitlToolRegistry` 包装层。
 
 启用方式：
 
@@ -173,6 +219,7 @@ python -m cli_app
 
 ```text
 ToolRuntime.execute(name, args)
+  -> HookManager bridge
   -> 根据工具 metadata 判断是否需要审批
   -> TerminalHitlHandler 询问用户
   -> 通过后执行原始工具
@@ -286,7 +333,8 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
 | Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `PAICLI_PLUGIN_ROOTS` 外部插件 root |
-| Plugin state | 已接入；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` 和自动 skill 候选 |
+| Plugin state | 已接入；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 经 AppStateStore 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` 和自动 skill 候选 |
+| AppRuntime/EventBus | 已接入薄层；runner 通过 AppRuntime 统一组装 tool/hook/state/session/memory/skill/event 资源，默认工具 hooks 经 HookManager 安装，插件状态经 AppStateStore 读写，运行前自动压缩和手动 `/compact` 经 SessionRuntime，插件启用/禁用、自动 skill 选择和显式/自动 skill 的 context 组装经 SkillManager，EventBus 先作为运行期事件入口 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
 | Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
 | 测试 | 主线 import / HITL / session 树测试可单独验证 |

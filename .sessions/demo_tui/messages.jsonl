@@ -1,0 +1,16 @@
+{"content": "Hello, this is a test message!", "id": "3c4c20d1336a", "parent_id": null, "role": "user", "timestamp": "2026-05-30T06:03:00.886586+00:00", "type": "message"}
+{"leaf_id": "3c4c20d1336a", "type": "leaf"}
+{"content": "Hello! This is a **demo** response with *markdown* support.\n\n- Item 1\n- Item 2\n- Item 3", "id": "8ad75bb47bf0", "parent_id": "3c4c20d1336a", "role": "assistant", "timestamp": "2026-05-30T06:03:00.888327+00:00", "type": "message"}
+{"leaf_id": "8ad75bb47bf0", "type": "leaf"}
+{"content": "Can you show me a code example?", "id": "708e81948078", "parent_id": "8ad75bb47bf0", "role": "user", "timestamp": "2026-05-30T06:03:00.888327+00:00", "type": "message"}
+{"leaf_id": "708e81948078", "type": "leaf"}
+{"content": "Sure! Here's a Python example:\n\n```python\ndef hello():\n    print('Hello, World!')\n```", "id": "e43b6c18c807", "parent_id": "708e81948078", "role": "assistant", "timestamp": "2026-05-30T06:03:00.888327+00:00", "type": "message"}
+{"leaf_id": "e43b6c18c807", "type": "leaf"}
+{"content": "Hello, this is a test message!", "id": "8f87855a2c4f", "parent_id": "e43b6c18c807", "role": "user", "timestamp": "2026-05-30T06:03:52.124576+00:00", "type": "message"}
+{"leaf_id": "8f87855a2c4f", "type": "leaf"}
+{"content": "Hello! This is a **demo** response with *markdown* support.\n\n- Item 1\n- Item 2\n- Item 3", "id": "56c7cea10eee", "parent_id": "8f87855a2c4f", "role": "assistant", "timestamp": "2026-05-30T06:03:52.125672+00:00", "type": "message"}
+{"leaf_id": "56c7cea10eee", "type": "leaf"}
+{"content": "Can you show me a code example?", "id": "0e6c7f9c1bd0", "parent_id": "56c7cea10eee", "role": "user", "timestamp": "2026-05-30T06:03:52.127091+00:00", "type": "message"}
+{"leaf_id": "0e6c7f9c1bd0", "type": "leaf"}
+{"content": "Sure! Here's a Python example:\n\n```python\ndef hello():\n    print('Hello, World!')\n```", "id": "5152decc4f60", "parent_id": "0e6c7f9c1bd0", "role": "assistant", "timestamp": "2026-05-30T06:03:52.127091+00:00", "type": "message"}
+{"leaf_id": "5152decc4f60", "type": "leaf"}

@@ -1,4 +1,3 @@
-import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,18 +16,13 @@ from tooling import (
     WriteTool,
     WebSearchTool,
     WebFetchTool,
-    register_freshness_guard,
 )
 
 from .constants import DEFAULT_LONG_TERM_PATH
 
 
-def build_registry() -> ToolRuntime:
-    """构造工具运行时。
-
-    PAICLI_APPROVAL=off/human/ai 控制工具级审批策略。
-    兼容旧变量：PAICLI_HITL=1 等价于 PAICLI_APPROVAL=human。
-    """
+def build_registry(*, install_hooks: bool = False) -> ToolRuntime:
+    """构造不带默认 hooks 的工具运行时，hooks 由 AppRuntime 安装。"""
     registry = ToolRegistry()
     registry.register(ReadTool())
     registry.register(WriteTool())
@@ -39,23 +33,7 @@ def build_registry() -> ToolRuntime:
     registry.register(FindTool())
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
-    runtime = ToolRuntime(registry)
-
-    # 编辑前必须先 read、且文件未被外部改动（核心防护，默认开启）
-    register_freshness_guard(runtime)
-
-    approval_mode = os.getenv("PAICLI_APPROVAL", "off").lower()
-    if os.getenv("PAICLI_HITL") == "1":
-        approval_mode = "human"
-
-    if approval_mode in {"human", "hitl"}:
-        from extensions import hitl
-        hitl.register(runtime)
-    elif approval_mode in {"ai", "reviewer"}:
-        from extensions import reviewer
-        reviewer.register(runtime)
-
-    return runtime
+    return ToolRuntime(registry)
 
 
 def list_tools(registry: ToolRuntime) -> str:
