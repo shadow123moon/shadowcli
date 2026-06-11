@@ -18,7 +18,7 @@ class BashTool(Tool):
 
     @property
     def description(self):
-        return "执行本机命令；Windows 下实际由 PowerShell 执行。直接写 PowerShell 命令，不要再嵌套 powershell -Command"
+        return "执行本机命令。Windows 环境：强制使用 PowerShell 语法（ls、Select-Object、ForEach-Object、$env:VAR 等），禁止使用 Linux/Bash 命令（find、grep、&&、||、export）"
 
     @property
     def parameters(self):
@@ -28,8 +28,10 @@ class BashTool(Tool):
                 "command": {
                     "type": "string",
                     "description": (
-                        "要执行的命令。Windows 下使用 PowerShell 语法；不要再嵌套 powershell -Command；"
-                        "不要使用 bash 专属的 find/xargs/tail/&&。"
+                        "要执行的命令。当前平台：Windows PowerShell。"
+                        "必须使用 PowerShell 语法：ls（不是 find）、Select-Object（不是 grep）、"
+                        "$env:VAR（不是 export VAR）、分号分隔命令（不是 && 或 ||）。"
+                        "禁止使用 Linux 命令：find、xargs、grep、tail、head、&&、||、export。"
                     ),
                 },
                 "timeout_seconds": {

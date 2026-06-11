@@ -2512,7 +2512,8 @@ class BashToolTests(unittest.TestCase):
         tool = BashTool()
 
         self.assertIn("PowerShell", tool.description)
-        self.assertIn("不要再嵌套 powershell -Command", tool.parameters["properties"]["command"]["description"])
+        self.assertIn("禁止使用 Linux 命令", tool.parameters["properties"]["command"]["description"])
+        self.assertIn("PowerShell 语法", tool.parameters["properties"]["command"]["description"])
 
 
 class PiStyleToolTests(unittest.TestCase):
