@@ -106,7 +106,6 @@ def _build_selection_payload(user_input: str, skills: Sequence[SkillDefinition])
         "skills": [
             {
                 "skill": skill_reference(skill),
-                "name": skill.name,
                 "source": skill.source,
                 "description": skill.description,
                 "argument_hint": skill.argument_hint,
