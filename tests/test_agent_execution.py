@@ -730,10 +730,8 @@ class AppRuntimeTests(unittest.TestCase):
         self.assertIs(app.session_runtime.long_term_memory, long_term)
         self.assertIsInstance(app.skill_manager, SkillManager)
         self.assertIs(app.skill_manager.state_store, app.state_store)
-        self.assertIsInstance(app.plugin_manager, PluginManager)
-        self.assertIs(app.plugin_manager, app.skill_manager.plugin_manager)
-        self.assertIsInstance(app.skill_registry, SkillRegistry)
-        self.assertIs(app.skill_registry, app.skill_manager.registry)
+        self.assertIsInstance(app.skill_manager.plugin_manager, PluginManager)
+        self.assertIsInstance(app.skill_manager.registry, SkillRegistry)
 
     def test_event_bus_publishes_subscribed_handlers_in_order(self):
         from app_runtime import EventBus
@@ -1602,7 +1600,7 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
-            skill = app.skill_registry.find("code-review")
+            skill = app.skill_manager.registry.find("code-review")
             self.assertIsNotNone(skill)
             selector = _FixedSkillSelector(SkillSelection(skill, "任务是在执行代码审查"))
 
@@ -1754,7 +1752,7 @@ class CliAgentTests(unittest.TestCase):
                 long_term_memory=[],
             )
             selection = SkillSelector(
-                app.skill_registry,
+                app.skill_manager.registry,
                 chat_fn=fake_chat,
             ).select("我要加一个新功能")
 
@@ -1790,7 +1788,7 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
-            registry = app.skill_registry
+            registry = app.skill_manager.registry
             skill = registry.find("brainstorming")
 
         self.assertIsNotNone(skill)

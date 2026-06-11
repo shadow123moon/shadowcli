@@ -120,7 +120,7 @@ class ReplRouter:
             self._handle_plugin(*plugin_input)
             return True
         if parse_skills_command(line):
-            self.renderer.message(format_skill_list(self.app_runtime.skill_registry.list()))
+            self.renderer.message(format_skill_list(self.app_runtime.skill_manager.registry.list()))
             return True
         skill_input = parse_skill_command(line)
         if skill_input is not None:
@@ -170,7 +170,7 @@ class ReplRouter:
             conversation_messages=self.session.messages(),
             on_message_appended=self.session.append_message,
         )
-        self.runtime_context_builder = RuntimeContextBuilder(session=self.session, long_term=self.long_term)
+        self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
 
     def ensure_session(self) -> tuple[SessionManager, ReactAgent, RuntimeContextBuilder]:
         if self.session is None:
@@ -223,7 +223,7 @@ class ReplRouter:
         ):
             self.renderer.message(_no_active_session_message())
             return
-        prepared = self.app_runtime.compact_agent_session(
+        prepared = self.app_runtime.session_runtime.compact_agent_session(
             self.session,
             self.agent,
             chat_fn=self.chat_fn,
@@ -248,7 +248,7 @@ class ReplRouter:
         self._run_agent_line(line, allow_auto_skill=False)
 
     def _handle_plugins(self) -> None:
-        plugins, diagnostics = self.app_runtime.plugin_status()
+        plugins, diagnostics = self.app_runtime.skill_manager.plugin_status()
         self.renderer.message(format_plugin_list(plugins, diagnostics))
 
     def _handle_plugin(self, action: str, name: str) -> None:
@@ -256,7 +256,7 @@ class ReplRouter:
             self.renderer.message("用法: /plugin enable|disable <name>")
             return
 
-        if not self.app_runtime.set_plugin_enabled(name, action == "enable"):
+        if not self.app_runtime.skill_manager.set_plugin_enabled(name, action == "enable"):
             self.renderer.message(f"未找到插件: {name}")
             return
 
@@ -313,7 +313,7 @@ class ReplRouter:
         )
 
     def _select_auto_skill(self, line: str) -> SkillSelection | None:
-        return self.app_runtime.select_auto_skill(
+        return self.app_runtime.skill_manager.select_auto_skill(
             line,
             selector=self.skill_selector,
             chat_fn=self.chat_fn,
@@ -326,7 +326,7 @@ class ReplRouter:
         *,
         arguments: str,
     ) -> SkillContextBuilder:
-        return self.app_runtime.build_skill_context(name, base, arguments=arguments)
+        return self.app_runtime.skill_manager.build_context(name, base, arguments=arguments)
 
     def _build_skill_context_for_definition(
         self,
@@ -335,7 +335,7 @@ class ReplRouter:
         *,
         arguments: str,
     ) -> SkillContextBuilder:
-        return self.app_runtime.build_skill_context_for_definition(skill, base, arguments=arguments)
+        return self.app_runtime.skill_manager.build_context_for_definition(skill, base, arguments=arguments)
 
     def _prepare_agent_run(
         self,
@@ -343,7 +343,7 @@ class ReplRouter:
         agent: ReactAgent,
         context_builder: RuntimeContextBuilder,
     ) -> RuntimeContextBuilder:
-        prepared = self.app_runtime.prepare_agent_run(
+        prepared = self.app_runtime.session_runtime.prepare_agent_run(
             session,
             agent,
             context_builder,
