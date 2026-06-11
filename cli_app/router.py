@@ -282,6 +282,7 @@ class ReplRouter:
         except KeyError:
             self.renderer.message(f"未找到 skill: {name}")
             return
+        self.renderer.message(f"✓ 加载 skill: {name}")
         self.run_agent_once(
             active_agent,
             agent_task,
