@@ -9,7 +9,7 @@ Python Agent CLI — 基于 ReAct 的交互式代码助手，支持 skill 扩展
 - 会话树结构 — 支持分支、跳转、压缩
 - Skill 系统 — 项目 skill + 插件贡献 skill，可选的 LLM 自动选择
 - 插件管理 — `.codex-plugin/plugin.json` 格式兼容，启用/禁用状态持久化
-- 运行时扩展 — Hook 机制（freshness guard、HITL、AI reviewer）
+- 运行时保护 — Hook 机制（freshness guard）
 - MCP 集成 — Model Context Protocol server 支持
 
 ## 架构分层
@@ -18,8 +18,7 @@ Python Agent CLI — 基于 ReAct 的交互式代码助手，支持 skill 扩展
 cli_app/        — 命令解析、REPL 路由、终端交互
 app_runtime/    — 运行期资源组装（AppRuntime、HookManager、SkillManager、SessionRuntime）
 agent/          — ReAct 循环实现
-tooling/        — 工具定义（read、write、bash、grep 等）
-extensions/     — 工具运行时扩展（hook 链、审批策略）
+tooling/        — 工具定义与工具运行时（read、write、bash、grep、ToolRuntime 等）
 skills/         — Skill 注册表和选择器
 plugin_runtime/ — 插件发现、manifest 解析、状态管理
 sessions/       — 会话树、压缩、长期记忆
@@ -32,7 +31,7 @@ ui/             — 渲染抽象（终端、Markdown）
 `app_runtime/` 负责创建、持有和刷新运行期资源：
 
 - **AppRuntime** — 总装入口，持有所有运行期组件
-- **HookManager** — 工具 hooks 的安装与桥接（freshness、HITL、reviewer）
+- **HookManager** — 工具 hooks 的安装与桥接（freshness guard）
 - **AppStateStore** — 项目级运行期状态（插件启用状态）
 - **SessionRuntime** — 会话上下文准备、自动压缩、agent 对话重载
 - **SkillManager** — 组合 PluginManager + SkillRegistry，承接插件启用/禁用、自动 skill 选择、skill context 组装

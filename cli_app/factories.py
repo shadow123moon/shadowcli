@@ -2,8 +2,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agent import ReactAgent
-from extensions.tool_runtime import ToolRuntime
 from llm import Message
+from tooling.runtime import ToolRuntime
 from sessions import TextLongTermMemory
 from tooling import (
     BashTool,

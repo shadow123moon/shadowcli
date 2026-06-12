@@ -87,7 +87,7 @@ _GUARDED_TOOLS = ("edit", "write")
 def register_freshness_guard(runtime, tracker: FileTracker | None = None) -> None:
     """把「编辑前必须先读、且未被外部改动」检查挂到 ToolRuntime。
 
-    与 extensions.hitl.register 同一机制：注册一个 before-execute hook，
+    通过 ToolRuntime 的 before-execute hook 链注册。
     命中即返回软拒绝（hard_stop=False），让模型按提示先 read 再重试，
     而不是终止整个任务。
     """

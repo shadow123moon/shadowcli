@@ -6,6 +6,12 @@ import requests
 import logging
 log = logging.getLogger(__name__)
 class WebSearchTool(Tool):
+    category = "web"
+    effect = "read"
+    concurrency_safe = True
+    result_kind = "search_hits"
+    guidance = "PaiCLI web_search 工具，用于搜索互联网并返回标题、摘要和链接；需要读取具体网页正文时再用 web_fetch。"
+
     @property
     def name(self):
         return "web_search"
@@ -80,6 +86,12 @@ class WebSearchTool(Tool):
         return "\n".join(lines)
 
 class WebFetchTool(Tool):
+    category = "web"
+    effect = "read"
+    concurrency_safe = True
+    result_kind = "web_text"
+    guidance = "PaiCLI web_fetch 工具，用于抓取指定 URL 的网页正文；适合读官方文档、博客和技术文章。"
+
     @property
     def name(self) -> str:
 

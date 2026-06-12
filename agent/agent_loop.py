@@ -7,8 +7,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
-from extensions.tool_runtime import ToolExecutionBlocked
 from llm import FunctionCall, Message, ToolCall, chat_stream
+from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
 from .prompts import filter_tool_definitions_for_model
@@ -26,17 +26,6 @@ TOOL_ERROR_PREFIXES = (
     "抓取失败",
     "编辑失败",
 )
-TOOL_EFFECTS = {
-    "read": "read",
-    "ls": "read",
-    "grep": "read",
-    "find": "read",
-    "web_search": "read",
-    "web_fetch": "read",
-    "write": "write",
-    "edit": "write",
-    "bash": "write",
-}
 MAX_PARALLEL_TOOL_CALLS = 8
 
 ChatFn = Callable[..., object]
@@ -225,7 +214,7 @@ class AgentLoop:
                 yield from _cancel_events()
                 return "cancelled"
 
-            if _is_parallel_read_tool(tc["name"]):
+            if _is_parallel_read_tool(tc["name"], self.tool_registry):
                 pending_reads.append(tc)
                 continue
 
@@ -340,8 +329,12 @@ def _tool_call_from_data(tc: dict) -> ToolCall:
     )
 
 
-def _is_parallel_read_tool(name: str) -> bool:
-    return TOOL_EFFECTS.get(name, "write") == "read"
+def _is_parallel_read_tool(name: str, registry) -> bool:
+    try:
+        tool = registry.get(name)
+    except (AttributeError, KeyError):
+        return False
+    return getattr(tool, "effect", "write") == "read" and bool(getattr(tool, "concurrency_safe", False))
 
 
 def _cancel_events():

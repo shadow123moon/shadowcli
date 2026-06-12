@@ -16,7 +16,6 @@ from agent.agent_loop import AgentLoop
 from agent.prompts import react_agent_prompt
 from agent.react_agent import ReactAgent
 from app_runtime import AppRuntime
-from extensions.tool_runtime import ToolExecutionBlocked, ToolRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from sessions import (
@@ -37,8 +36,11 @@ from tooling import (
     LsTool,
     ReadTool,
     ToolRegistry,
+    WebFetchTool,
+    WebSearchTool,
     WriteTool,
 )
+from tooling.runtime import ToolExecutionBlocked, ToolRuntime
 from ui import BranchNavigationChoice, ask_branch_navigation_choice
 
 
@@ -807,12 +809,57 @@ class ReactAgentTests(unittest.TestCase):
         self.assertIn("E:/demo/project", prompt)
         self.assertIn("cwd", prompt)
 
+    def test_react_agent_prompt_is_sectioned(self):
+        prompt = react_agent_prompt("- read: 读取文件", cwd="E:/demo/project")
+
+        self.assertIn("## 身份", prompt)
+        self.assertIn("## 工作方式", prompt)
+        self.assertIn("## 代码修改原则", prompt)
+        self.assertIn("## 验证标准", prompt)
+        self.assertIn("## 沟通方式", prompt)
+        self.assertIn("## 上下文纪律", prompt)
+        self.assertIn("## 本地环境", prompt)
+        self.assertIn("## 工具使用", prompt)
+        self.assertIn("## 文件修改", prompt)
+        self.assertIn("## 工具结果", prompt)
+        self.assertIn("## 可用工具", prompt)
+        self.assertIn("工具结果可能", prompt)
+        self.assertIn("- read: 读取文件", prompt)
+
+    def test_react_agent_prompt_includes_core_work_protocol(self):
+        prompt = react_agent_prompt("- read: 读取文件", cwd="E:/demo/project")
+
+        self.assertIn("能直接完成就直接完成", prompt)
+        self.assertIn("先读现有代码", prompt)
+        self.assertIn("不要覆盖用户已有改动", prompt)
+        self.assertIn("声称完成前必须有验证依据", prompt)
+        self.assertIn("测试失败", prompt)
+        self.assertIn("工具结果、历史摘要、长期记忆可能不完整", prompt)
+
+    def test_react_agent_prompt_includes_tool_guidance_when_present(self):
+        prompt = react_agent_prompt(
+            "- read: 读取文件",
+            cwd="E:/demo/project",
+            tool_guidance="- read: 先定位范围，再读取必要片段。",
+        )
+
+        self.assertIn("## 工具说明", prompt)
+        self.assertIn("- read: 先定位范围，再读取必要片段。", prompt)
+
     def test_react_system_prompt_carries_current_working_directory(self):
         agent = ReactAgent(_ToolDefinitionRegistry())
 
         system_message = agent.conversation_messages[0]
         self.assertEqual(system_message.role, "system")
         self.assertIn(os.getcwd(), system_message.content)
+
+    def test_react_system_prompt_collects_guidance_from_visible_tools(self):
+        agent = ReactAgent(_GuidanceRegistry())
+
+        system_message = agent.conversation_messages[0]
+        self.assertIn("## 工具说明", system_message.content)
+        self.assertIn("- read: 使用 read 读取项目文件。", system_message.content)
+        self.assertNotIn("隐藏的 MCP 工具说明", system_message.content)
 
     def test_react_keeps_tool_call_and_result_messages_between_turns(self):
         calls = []
@@ -1213,6 +1260,98 @@ class AgentLoopTests(unittest.TestCase):
         self.assertLess(timeline["r2"]["start"], timeline["f2"]["end"])
         self.assertGreater(timeline["e2"]["start"], timeline["f2"]["end"])
         self.assertGreater(timeline["e2"]["start"], timeline["r2"]["end"])
+
+    def test_metadata_read_tool_runs_parallel_without_agent_name_entry(self):
+        calls = []
+        registry = _TimedRegistry(
+            delay=0.2,
+            tool_metadata={
+                "local_scan": _MetadataTool(effect="read", concurrency_safe=True),
+                "local_symbols": _MetadataTool(effect="read", concurrency_safe=True),
+            },
+        )
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            if len(calls) == 1:
+                for name, label in [("local_scan", "scan"), ("local_symbols", "symbols")]:
+                    yield StreamEvent(
+                        "tool_call",
+                        {
+                            "id": f"call-{label}",
+                            "type": "function",
+                            "name": name,
+                            "arguments": f'{{"label": "{label}"}}',
+                        },
+                    )
+                yield StreamEvent("done", None)
+            else:
+                yield StreamEvent("content", "完成")
+                yield StreamEvent("done", None)
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        start = time.perf_counter()
+        with patch("agent.agent_loop.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="并行本地扫描")))
+        elapsed = time.perf_counter() - start
+
+        tool_results = [event.data["result"] for event in events if event.type == "tool_result"]
+        self.assertEqual(tool_results, ["local_scan:scan", "local_symbols:symbols"])
+        self.assertLess(elapsed, 0.35)
+
+        timeline = registry.timeline_by_label()
+        self.assertLess(timeline["scan"]["start"], timeline["symbols"]["end"])
+        self.assertLess(timeline["symbols"]["start"], timeline["scan"]["end"])
+
+    def test_tools_without_parallel_read_metadata_run_serially(self):
+        calls = []
+        registry = _TimedRegistry(
+            delay=0.15,
+            tool_metadata={
+                "maybe_read": _MetadataTool(),
+                "maybe_read_again": _MetadataTool(),
+            },
+        )
+
+        def fake_stream(messages, tools=None, cancel=None):
+            calls.append((list(messages), tools))
+            if len(calls) == 1:
+                for name, label in [("maybe_read", "first"), ("maybe_read_again", "second")]:
+                    yield StreamEvent(
+                        "tool_call",
+                        {
+                            "id": f"call-{label}",
+                            "type": "function",
+                            "name": name,
+                            "arguments": f'{{"label": "{label}"}}',
+                        },
+                    )
+                yield StreamEvent("done", None)
+            else:
+                yield StreamEvent("content", "完成")
+                yield StreamEvent("done", None)
+
+        agent = AgentLoop(
+            "react",
+            "system",
+            chat=None,
+            tool_registry=registry,
+        )
+
+        with patch("agent.agent_loop.chat_stream", fake_stream):
+            events = list(agent.execute(Message(role="user", content="串行未知工具")))
+
+        tool_results = [event.data["result"] for event in events if event.type == "tool_result"]
+        self.assertEqual(tool_results, ["maybe_read:first", "maybe_read_again:second"])
+
+        timeline = registry.timeline_by_label()
+        self.assertGreater(timeline["second"]["start"], timeline["first"]["end"])
 
 
 class CliAgentTests(unittest.TestCase):
@@ -2394,14 +2533,40 @@ class _StubTool:
         return self.result
 
 
+class _MetadataTool:
+    def __init__(
+        self,
+        *,
+        category: str = "test",
+        effect: str = "write",
+        concurrency_safe: bool = False,
+        result_kind: str = "text",
+    ):
+        self.category = category
+        self.effect = effect
+        self.concurrency_safe = concurrency_safe
+        self.result_kind = result_kind
+
+
 class _TimedRegistry:
-    def __init__(self, delay):
+    def __init__(self, delay, tool_metadata=None):
         self.delay = delay
         self.events = []
         self._lock = threading.Lock()
+        self.tool_metadata = {
+            "read": _MetadataTool(category="file", effect="read", concurrency_safe=True),
+            "grep": _MetadataTool(category="file", effect="read", concurrency_safe=True),
+            "find": _MetadataTool(category="file", effect="read", concurrency_safe=True),
+            "edit": _MetadataTool(category="file", effect="write", concurrency_safe=False),
+        }
+        if tool_metadata:
+            self.tool_metadata.update(tool_metadata)
 
     def get_all_definitions(self):
         return []
+
+    def get(self, name):
+        return self.tool_metadata[name]
 
     def execute(self, name, arguments):
         label = arguments["label"]
@@ -2484,6 +2649,49 @@ class _MixedToolDefinitionRegistry:
         return "executed"
 
 
+class _GuidanceTool:
+    def __init__(self, name: str, guidance: str):
+        self.name = name
+        self.guidance = guidance
+
+
+class _GuidanceRegistry:
+    def __init__(self):
+        self.tools = {
+            "read": _GuidanceTool("read", "使用 read 读取项目文件。"),
+            "mcp__filesystem__search_files": _GuidanceTool(
+                "mcp__filesystem__search_files",
+                "隐藏的 MCP 工具说明",
+            ),
+        }
+
+    def get_all_definitions(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "读取文件内容",
+                    "parameters": {},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp__filesystem__search_files",
+                    "description": "Search files through MCP filesystem",
+                    "parameters": {},
+                },
+            },
+        ]
+
+    def get(self, name):
+        return self.tools[name]
+
+    def execute(self, name, arguments):
+        return "executed"
+
+
 class BashToolTests(unittest.TestCase):
     def test_bash_supports_ls_in_project_shell(self):
         result = BashTool().execute({"command": "ls -l ."})
@@ -2499,6 +2707,25 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("命令执行失败（退出码", result)
         self.assertIn("没有 stdout/stderr 输出", result)
 
+    def test_bash_truncates_long_success_stdout(self):
+        result = BashTool().execute({
+            "command": 'python -c "print(\'x\' * 20000)"',
+        })
+
+        self.assertIn("已截断", result)
+        self.assertLess(len(result), 13000)
+
+    def test_bash_truncates_long_failure_stderr_and_classifies_error(self):
+        result = BashTool().execute({
+            "command": 'python -c "import sys; sys.stderr.write(\'e\' * 20000); sys.exit(3)"',
+        })
+
+        self.assertTrue(result.startswith("命令执行失败（退出码"))
+        self.assertIn("错误类型: command_failed", result)
+        self.assertIn("stderr:", result)
+        self.assertIn("已截断", result)
+        self.assertLess(len(result), 13000)
+
     def test_bash_times_out(self):
         result = BashTool().execute({
             "command": 'python -c "import time; time.sleep(2)"',
@@ -2506,6 +2733,7 @@ class BashToolTests(unittest.TestCase):
         })
 
         self.assertIn("命令超时", result)
+        self.assertIn("错误类型: timeout", result)
         self.assertIn("超过 1 秒", result)
 
     def test_bash_description_explains_windows_powershell_semantics(self):
@@ -2514,6 +2742,14 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("PowerShell", tool.description)
         self.assertIn("禁止使用 Linux 命令", tool.parameters["properties"]["command"]["description"])
         self.assertIn("PowerShell 语法", tool.parameters["properties"]["command"]["description"])
+
+    def test_bash_guidance_distinguishes_shell_from_paicli_commands(self):
+        guidance = BashTool().guidance
+
+        self.assertIn("PowerShell", guidance)
+        self.assertIn("PaiCLI slash 命令", guidance)
+        self.assertIn("/skill", guidance)
+        self.assertIn("不要通过 bash", guidance)
 
 
 class PiStyleToolTests(unittest.TestCase):
@@ -2628,6 +2864,34 @@ class PiStyleToolTests(unittest.TestCase):
             self.assertNotIn(name, names)
         for name in ["index_codebase", "search_code"]:
             self.assertNotIn(name, names)
+
+    def test_builtin_tools_declare_minimal_metadata(self):
+        cases = [
+            (ReadTool(), "file", "read", True, "text"),
+            (LsTool(), "file", "read", True, "file_list"),
+            (GrepTool(), "file", "read", True, "search_hits"),
+            (FindTool(), "file", "read", True, "file_list"),
+            (WriteTool(), "file", "write", False, "text"),
+            (EditTool(), "file", "write", False, "text"),
+            (BashTool(), "shell", "execute", False, "command_output"),
+            (WebSearchTool(), "web", "read", True, "search_hits"),
+            (WebFetchTool(), "web", "read", True, "web_text"),
+        ]
+
+        for tool, category, effect, concurrency_safe, result_kind in cases:
+            with self.subTest(tool=tool.name):
+                self.assertEqual(tool.category, category)
+                self.assertEqual(tool.effect, effect)
+                self.assertEqual(tool.concurrency_safe, concurrency_safe)
+                self.assertEqual(tool.result_kind, result_kind)
+
+    def test_file_search_guidance_names_paicli_tools_not_shell_commands(self):
+        self.assertIn("PaiCLI ls 工具", LsTool().guidance)
+        self.assertIn("不是终端 ls 命令", LsTool().guidance)
+        self.assertIn("PaiCLI grep 工具", GrepTool().guidance)
+        self.assertIn("不是终端 grep/rg 命令", GrepTool().guidance)
+        self.assertIn("PaiCLI find 工具", FindTool().guidance)
+        self.assertIn("不是终端 find 命令", FindTool().guidance)
 
     def test_registry_executes_pi_style_tools_through_same_entrypoint(self):
         registry = ToolRegistry()

@@ -3,11 +3,22 @@ import subprocess
 from typing import Dict
 
 from .base import Tool
+from .results import truncate_tool_text
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
 
 
 class BashTool(Tool):
+    category = "shell"
+    effect = "execute"
+    concurrency_safe = False
+    result_kind = "command_output"
+    guidance = (
+        "bash 工具只用于执行真正的本机 PowerShell 命令；不要通过 bash 调 PaiCLI 工具"
+        "（read/write/edit/ls/grep/find）或 PaiCLI slash 命令（/skill、/plugin、/tree、/jump、/compact），"
+        "这些不是终端命令。"
+    )
+
     approval_required = True
     approval_level = "🔴 高危"
     approval_reason = "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态"
@@ -81,12 +92,12 @@ def _format_result(result, command: str = "", timeout: int = 0) -> str:
     """格式化命令执行结果（支持正常结果和超时异常）"""
     # 超时异常
     if isinstance(result, subprocess.TimeoutExpired):
-        parts = [f"命令超时（超过 {timeout} 秒），已终止。", f"command: {command}"]
+        parts = [f"命令超时（超过 {timeout} 秒），已终止。", "错误类型: timeout", f"command: {command}"]
         if result.stdout:
-            stdout_str = result.stdout.decode(errors="replace") if isinstance(result.stdout, bytes) else str(result.stdout)
+            stdout_str = _stream_text(result.stdout)
             parts.append(f"stdout:\n{stdout_str}")
         if result.stderr:
-            stderr_str = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr)
+            stderr_str = _stream_text(result.stderr)
             parts.append(f"stderr:\n{stderr_str}")
         return "\n\n".join(parts)
 
@@ -95,16 +106,21 @@ def _format_result(result, command: str = "", timeout: int = 0) -> str:
     stderr = result.stderr or ""
     if result.returncode == 0:
         if stdout:
-            return stdout
+            return truncate_tool_text(stdout)
         if stderr:
-            return f"命令执行成功，但写入了 stderr：\n{stderr}"
+            return f"命令执行成功，但写入了 stderr：\n{truncate_tool_text(stderr)}"
         return "命令执行成功（无输出）"
 
-    parts = [f"命令执行失败（退出码 {result.returncode}）"]
+    parts = [f"命令执行失败（退出码 {result.returncode}）", "错误类型: command_failed"]
     if stdout:
-        parts.append(f"stdout:\n{stdout}")
+        parts.append(f"stdout:\n{truncate_tool_text(stdout)}")
     if stderr:
-        parts.append(f"stderr:\n{stderr}")
-    if len(parts) == 1:
+        parts.append(f"stderr:\n{truncate_tool_text(stderr)}")
+    if len(parts) == 2:
         parts.append("没有 stdout/stderr 输出。")
     return "\n\n".join(parts)
+
+
+def _stream_text(value) -> str:
+    text = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+    return truncate_tool_text(text)

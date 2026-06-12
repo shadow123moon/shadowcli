@@ -37,7 +37,7 @@ python -m cli_app
 ```text
 cli_app
   -> AppRuntime 持有 ToolRuntime / HookManager / AppStateStore / SessionStore / LongTermMemory / SessionRuntime / SkillManager / EventBus
-  -> HookManager 安装 freshness/HITL/Reviewer 工具 hooks，并桥接到 ToolRuntime
+  -> HookManager 安装 freshness guard 工具 hook，并桥接到 ToolRuntime
   -> AppStateStore 统一项目级运行期状态入口
   -> SessionRuntime 负责压缩、重载 agent conversation、重建 RuntimeContextBuilder
   -> SkillManager 持有 PluginManager / SkillRegistry
@@ -151,9 +151,7 @@ cli_app /plugin enable|disable <name>
 | `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
 | `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，管理 `.agents/plugins.json` 启用状态，当前只加载 enabled 插件的 skill contributions |
 | `skills/` | 发现、加载并格式化 `SKILL.md` / `skill.md` 上下文 |
-| `tooling/` | 工具基类、具体工具、工具注册中心 |
-| `extensions/tool_runtime.py` | 工具运行时，只执行 before_execute hook 链和 ToolRegistry 调用；默认 hook 安装入口在 AppRuntime/HookManager |
-| `extensions/approval_policy.py` | 工具风险判断 |
+| `tooling/` | 工具基类、具体工具、工具注册中心、ToolRuntime；默认 hook 安装入口在 AppRuntime/HookManager |
 | `llm/` | OpenAI 兼容 Chat API 客户端和消息模型 |
 
 ## 记忆
@@ -204,42 +202,20 @@ SessionManager                     -> branch_to 或 branch_to_with_summary
 
 普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。
 
-## HITL
+## 运行时 Hooks
 
-HITL 已经经 `HookManager` 接到 `ToolRuntime`，不再有独立的 `HitlToolRegistry` 包装层。
-
-启用方式：
-
-```powershell
-$env:PAICLI_HITL="1"
-python -m cli_app
-```
+默认工具 hook 只有 freshness guard：`edit` / `write` 修改已存在文件前，必须先通过 `read` 读取过该文件；如果文件在读取后被进程外修改，本次修改会被软拒绝并要求重新读取。
 
 执行链路：
 
 ```text
 ToolRuntime.execute(name, args)
   -> HookManager bridge
-  -> 根据工具 metadata 判断是否需要审批
-  -> TerminalHitlHandler 询问用户
-  -> 通过后执行原始工具
+  -> freshness guard 检查 read-before-edit/write
+  -> ToolRegistry.execute(name, args)
 ```
 
-工具通过自身属性声明风险：
-
-```python
-approval_required = True
-approval_level = "🔴 高危"
-approval_reason = "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态"
-```
-
-当前默认需要审批的工具：
-
-```text
-write
-edit
-bash
-```
+HITL / AI reviewer 审批层已从主路径移除。后续如果重新引入审批，应作为插件/runtime contribution 经 `AppRuntime` 统一安装，而不是恢复独立包装层或散落到 runner。
 
 ## 工具
 
@@ -328,7 +304,7 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | 默认 React 对话 | 已接入 |
 | `/plan` 单 Agent | 已接入 |
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
-| HITL | 已接入，合并到 `ToolRegistry` |
+| 运行时 hooks | 默认只保留 freshness guard；HITL / AI reviewer 审批层已移除 |
 | Session/长期记忆 | 已接入，session 实时记录会话树，长期记忆写入 `long_term.md` |
 | Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
@@ -337,7 +313,7 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | AppRuntime/EventBus | 已接入薄层；runner 通过 AppRuntime 统一组装 tool/hook/state/session/memory/skill/event 资源，默认工具 hooks 经 HookManager 安装，插件状态经 AppStateStore 读写，运行前自动压缩和手动 `/compact` 经 SessionRuntime，插件启用/禁用、自动 skill 选择和显式/自动 skill 的 context 组装经 SkillManager，EventBus 先作为运行期事件入口 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |
 | Plan 日志 | 旧 `logs/plans/` 专用日志已移出主路径 |
-| 测试 | 主线 import / HITL / session 树测试可单独验证 |
+| 测试 | 主线 import / ToolRuntime / freshness guard / session 树测试可单独验证 |
 
 ## 待清理
 

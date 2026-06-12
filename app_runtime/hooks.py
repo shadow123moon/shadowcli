@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from extensions.tool_runtime import BeforeExecuteHook
+from tooling.runtime import BeforeExecuteHook
 
 from .events import EventBus
 
@@ -36,20 +34,7 @@ class HookManager:
 
         register_freshness_guard(self)
 
-        approval_mode = os.getenv("PAICLI_APPROVAL", "off").lower()
-        if os.getenv("PAICLI_HITL") == "1":
-            approval_mode = "human"
-
-        if approval_mode in {"human", "hitl"}:
-            from extensions import hitl
-
-            hitl.register(self)
-        elif approval_mode in {"ai", "reviewer"}:
-            from extensions import reviewer
-
-            reviewer.register(self)
-
-        self._publish("hooks.default_tool_hooks.installed", approval_mode=approval_mode)
+        self._publish("hooks.default_tool_hooks.installed")
 
     def run_before_tool_execute(self, name: str, arguments: dict[str, Any], tool: Any) -> dict[str, Any] | None:
         for hook in self.before_tool_execute_hooks:

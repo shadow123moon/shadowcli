@@ -63,4 +63,21 @@ def _build_react_system_prompt(tool_registry: ToolRegistry) -> str:
     tools_desc = "\n".join(
         f"- {d['function']['name']}: {d['function']['description']}" for d in defs
     )
-    return react_agent_prompt(tools_desc)
+    tool_guidance = _build_tool_guidance(tool_registry, defs)
+    return react_agent_prompt(tools_desc, tool_guidance=tool_guidance)
+
+
+def _build_tool_guidance(tool_registry: ToolRegistry, definitions: list[dict]) -> str:
+    lines: list[str] = []
+    for definition in definitions:
+        name = str(definition.get("function", {}).get("name", ""))
+        if not name:
+            continue
+        try:
+            tool = tool_registry.get(name)
+        except (AttributeError, KeyError):
+            continue
+        guidance = str(getattr(tool, "guidance", "")).strip()
+        if guidance:
+            lines.append(f"- {name}: {guidance}")
+    return "\n".join(lines)

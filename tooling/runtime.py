@@ -1,12 +1,16 @@
-from typing import Any, Callable, List
+from __future__ import annotations
 
-from tooling import Tool, ToolRegistry
+from collections.abc import Callable
+from typing import Any
+
+from .base import Tool
+from .registry import ToolRegistry
 
 BeforeExecuteHook = Callable[[str, dict[str, Any], Tool], dict[str, Any] | None]
 
 
 class ToolExecutionBlocked(RuntimeError):
-    """工具调用被审批层硬拒绝，应停止当前 Agent/Step。"""
+    """Raised when a tool hook blocks execution with a hard stop."""
 
 
 class ToolRuntime:
@@ -29,9 +33,8 @@ class ToolRuntime:
 
         return self.registry.execute(name, arguments)
 
-    def get_all_definitions(self) -> List[dict]:
+    def get_all_definitions(self) -> list[dict]:
         return self.registry.get_all_definitions()
 
     def get(self, name: str) -> Tool:
         return self.registry.get(name)
-
