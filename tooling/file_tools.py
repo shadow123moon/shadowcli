@@ -99,12 +99,20 @@ class ReadTool(Tool):
         return "\n\n".join(sections)
 
     def _read_one(self, arguments: Dict) -> str:
+        from .file_cache import _file_cache
+
         path = Path(arguments["path"])
 
         if not path.exists():
             return f"文件不存在: {path}"
         if path.is_dir():
             return f"这是目录不是文件: {path}"
+
+        # 检查缓存
+        should_read, hint_or_old = _file_cache.should_read(path)
+        if not should_read:
+            # 文件未修改，直接返回提示
+            return hint_or_old
 
         size = path.stat().st_size
         if size > 250 * 1024:
@@ -130,6 +138,7 @@ class ReadTool(Tool):
 
         total = len(lines)
         if total == 0:
+            _file_cache.store(path, "")
             return "（空文件，0 行）"
         if offset > total:
             return f"行号 {offset} 超出范围（文件共 {total} 行）"
@@ -142,11 +151,41 @@ class ReadTool(Tool):
                 line = line[:2000] + "..."
             numbered.append(f"{i:6d}| {line}")
 
+        content = "\n".join(numbered)
+        full_content = "\n".join(lines)
+
+        # 增量对比（如果有旧内容）
+        if hint_or_old:
+            diff = self._compute_diff(hint_or_old, full_content)
+            changed_lines = diff.count('\n')
+            # 变化小于30%且少于100行，显示diff
+            if changed_lines > 5 and changed_lines < min(100, total * 0.3):
+                _file_cache.store(path, full_content)
+                header = f"[UPDATED] {path.name} (total {total} lines, {changed_lines} changes)"
+                return f"{header}\n\n{diff}"
+
+        # 首次读取或大改动，显示完整内容
+        _file_cache.store(path, full_content)
+
         header = f"共 {total} 行，显示 {offset}-{offset + len(selected) - 1}"
         if offset + len(selected) <= total:
             header += f"（还有更多，用 offset={offset + len(selected)} 继续读取）"
 
-        return header + "\n" + "\n".join(numbered)
+        return header + "\n" + content
+
+    def _compute_diff(self, old: str, new: str) -> str:
+        """计算文件差异，返回简化的 unified diff"""
+        import difflib
+        old_lines = old.splitlines(keepends=False)
+        new_lines = new.splitlines(keepends=False)
+        diff_lines = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile='旧版本', tofile='新版本',
+            lineterm='', n=3
+        ))
+        if not diff_lines:
+            return "（无变化）"
+        return '\n'.join(diff_lines)
 
 
 class WriteTool(Tool):
