@@ -99,6 +99,11 @@ class SkillRegistry:
     def load_definition(self, definition: SkillDefinition) -> LoadedSkill:
         raw_content = _read_skill_file(definition.path)
         _, body = _split_frontmatter(raw_content)
+
+        # 重写插件 skill 里的相对路径引用
+        if definition.source.startswith("plugin:"):
+            body = _rewrite_skill_paths(body, definition.path.parent, definition.root)
+
         return LoadedSkill(
             definition=definition,
             raw_content=raw_content,
@@ -237,6 +242,59 @@ def _split_frontmatter(text: str) -> tuple[str, str]:
             body = "\n".join(lines[index + 1:]).lstrip("\n")
             return frontmatter, body
     return "", text
+
+
+def _rewrite_skill_paths(body: str, skill_dir: Path, plugin_root: Path | None) -> str:
+    """重写插件 skill 中的相对路径引用
+
+    将 `skills/xxx` 和 `scripts/xxx` 替换成从项目根目录的相对路径。
+
+    例如：
+    - `skills/brainstorming/visual-companion.md`
+      → `plugins/superpowers/skills/brainstorming/visual-companion.md`
+    - `scripts/start-server.sh`
+      → `plugins/superpowers/skills/brainstorming/scripts/start-server.sh`
+    """
+    import re
+
+    # 获取从项目根到 skill 目录的相对路径
+    if plugin_root is None:
+        return body
+
+    try:
+        # 计算 skill_dir 相对于当前工作目录的路径
+        from pathlib import Path
+        cwd = Path.cwd()
+        skill_rel = skill_dir.relative_to(cwd)
+        from_root = str(skill_rel).replace("\\", "/")
+    except (ValueError, AttributeError):
+        # 如果无法计算相对路径，返回原内容
+        return body
+
+    # 替换 markdown 代码块里的 `skills/skill_name/xxx`
+    # 原文：`skills/brainstorming/visual-companion.md`
+    # 目标：`plugins/superpowers/skills/brainstorming/visual-companion.md`
+    # 提取 skill_name
+    skill_name = skill_dir.name
+
+    def replace_skills(match):
+        # match.group(1) = "brainstorming/visual-companion.md"
+        # 去掉开头的 skill_name/
+        rest = match.group(1)
+        if rest.startswith(f"{skill_name}/"):
+            rest = rest[len(skill_name)+1:]
+        return f'`{from_root}/{rest}`'
+
+    body = re.sub(r'`skills/([^`]+)`', replace_skills, body)
+
+    # 替换 bash 命令里的 scripts/
+    # 例如：scripts/start-server.sh
+    def replace_scripts(match):
+        return f'{match.group(1)}{from_root}/scripts/'
+
+    body = re.sub(r'(\s|^)scripts/', replace_scripts, body, flags=re.MULTILINE)
+
+    return body
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
