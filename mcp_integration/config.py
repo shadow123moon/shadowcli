@@ -24,11 +24,11 @@ class McpServerConfig:
 
 
 def load_mcp_config() -> dict[str, McpServerConfig]:
-    """从 ~/.paicli/mcp.json 加载配置
+    """从 ~/.shadowcli/mcp.json 加载配置
 
     如果配置文件不存在,创建默认配置(filesystem server 默认禁用)
     """
-    config_path = Path.home() / ".paicli" / "mcp.json"
+    config_path = Path.home() / ".shadowcli" / "mcp.json"
 
     if not config_path.exists():
         # 创建默认配置
