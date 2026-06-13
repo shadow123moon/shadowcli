@@ -431,3 +431,13 @@ def ask_branch_navigation_choice(plan=None, out: TextIO | None = None) -> Branch
         if choice == "3":
             return BranchNavigationChoice.CANCEL
         _write("请输入 1、2 或 3。", out)
+
+
+def ask_memory_confirmation(suggestion, out: TextIO | None = None) -> bool:
+    _write(f"建议保存长期记忆 [{suggestion.memory_type}]:", out)
+    _write(str(suggestion.text), out)
+    reason = str(getattr(suggestion, "reason", "") or "").strip()
+    if reason:
+        _write(f"原因: {reason}", out)
+    choice = input("保存吗？[y/N]: ").strip().lower()
+    return choice in {"y", "yes"}

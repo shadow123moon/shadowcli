@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .long_term import TextLongTermMemory
 from .manager import SessionManager
 
 
@@ -13,7 +12,7 @@ class RuntimeContextBuilder:
         self,
         *,
         session: SessionManager,
-        long_term: TextLongTermMemory | Iterable[str] | None = None,
+        long_term: Iterable[str] | None = None,
         long_term_limit: int = 8,
     ):
         self.session = session
@@ -39,13 +38,14 @@ class RuntimeContextBuilder:
 
 
 def _search_facts(
-    long_term: TextLongTermMemory | Iterable[str],
+    long_term: Iterable[str],
     query: str,
     *,
     limit: int,
 ) -> list[str]:
-    if isinstance(long_term, TextLongTermMemory):
-        return long_term.search(query, limit=limit)
+    search = getattr(long_term, "search", None)
+    if callable(search):
+        return list(search(query, limit=limit))
     facts = [str(fact).strip() for fact in long_term if str(fact).strip()]
     if limit <= 0:
         return []

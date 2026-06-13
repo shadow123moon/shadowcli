@@ -3,8 +3,8 @@ from pathlib import Path
 
 from agent import ReactAgent
 from llm import Message
+from memory import TextLongTermMemory
 from tooling.runtime import ToolRuntime
-from sessions import TextLongTermMemory
 from tooling import (
     BashTool,
     EditTool,

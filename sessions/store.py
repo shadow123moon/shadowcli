@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .ids import new_session_id, project_key_for
 from .entries import MessageEntry
-from .long_term import DEFAULT_LONG_TERM_NAME
 from .manager import SessionManager
 from .repository import SessionRepository
 from .types import DEFAULT_SESSION_TITLE, ProjectMeta, SESSION_VERSION, SessionMeta, title_from_text
@@ -115,10 +114,6 @@ class SessionStore:
                 updated_at=now,
             )
         _write_json(project_path, project.to_dict())
-
-        long_term_path = project_dir / DEFAULT_LONG_TERM_NAME
-        if not long_term_path.exists():
-            long_term_path.write_text("", encoding="utf-8")
 
         return project_dir
 

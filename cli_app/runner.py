@@ -28,24 +28,24 @@ def run_once(
     *,
     runtime_context_builder: RuntimeContextBuilder | None = None,
     renderer: Renderer | None = None,
-) -> None:
+) -> str:
     renderer = renderer or TerminalRenderer()
     try:
         plan_input = parse_plan_command(user_input)
         if plan_input is not None:
             if not plan_input:
                 renderer.message("用法: /plan <任务>")
-                return
+                return ""
             context = runtime_context_builder.build(plan_input) if runtime_context_builder is not None else ""
-            _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context, renderer=renderer)
+            return _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context, renderer=renderer)
         else:
             context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
-            _run_agent_events(agent, user_input, context=context, renderer=renderer)
+            return _run_agent_events(agent, user_input, context=context, renderer=renderer)
             # React 模式：已经流式打印，不再重复输出
     except Exception as e:
         log.exception("[入口] 执行失败")
         renderer.message(f"\n[ERROR] 执行失败: {e}")
-        return
+        return ""
 
 
 def _single_agent_plan_prompt(task: str) -> str:

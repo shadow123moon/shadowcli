@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
-from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager, TextLongTermMemory
+from memory import MEMORY_TYPES, TextLongTermMemory
+from sessions import BranchSummaryEntry, CompactionEntry, CompactionResult, MessageEntry, SessionManager
 from plugin_runtime import LoadedPlugin, PluginDiagnostic
 from skills import SkillDefinition
 
@@ -116,8 +117,11 @@ def handle_remember(memory: TextLongTermMemory, user_input: str) -> str:
         return f"用法: {REMEMBER_COMMAND} <事实>"
     if not fact:
         return f"用法: {REMEMBER_COMMAND} <事实>"
-    memory.remember(fact)
-    return f"已记住: {fact}"
+    memory_type, content = _split_remember_type(fact)
+    if not content:
+        return f"用法: {REMEMBER_COMMAND} [user|project|feedback|reference] <事实>"
+    memory.remember(content, memory_type=memory_type)
+    return f"已记住: {content}"
 
 
 def format_memory_status(memory: TextLongTermMemory) -> str:
@@ -125,6 +129,14 @@ def format_memory_status(memory: TextLongTermMemory) -> str:
         f"long_term : {len(memory)} facts",
         f"storage   : {memory.storage_path}",
     ])
+
+
+def _split_remember_type(payload: str) -> tuple[str | None, str]:
+    head, separator, tail = payload.strip().partition(" ")
+    memory_type = head.rstrip(":").lower()
+    if separator and memory_type in MEMORY_TYPES:
+        return memory_type, tail.strip()
+    return None, payload.strip()
 
 
 def format_skill_list(skills: Sequence[SkillDefinition]) -> str:

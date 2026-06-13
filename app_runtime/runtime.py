@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sessions import SessionStore, TextLongTermMemory
-from sessions.long_term import DEFAULT_LONG_TERM_NAME
+from memory import DEFAULT_LONG_TERM_NAME, TextLongTermMemory
+from sessions import SessionStore
 
 from .events import EventBus
 from .hooks import HookManager

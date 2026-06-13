@@ -19,9 +19,10 @@ cli_app/        — 命令解析、REPL 路由、终端交互
 app_runtime/    — 运行期资源组装（AppRuntime、HookManager、SkillManager、SessionRuntime）
 agent/          — ReAct 循环实现
 tooling/        — 工具定义与工具运行时（read、write、bash、grep、ToolRuntime 等）
+memory/         — 长期记忆存储、建议服务、propose_memory 工具
 skills/         — Skill 注册表和选择器
 plugin_runtime/ — 插件发现、manifest 解析、状态管理
-sessions/       — 会话树、压缩、长期记忆
+sessions/       — 会话树、分支跳转、压缩
 llm/            — LLM 客户端封装（OpenAI 兼容 API）
 ui/             — 渲染抽象（终端、Markdown）
 ```
@@ -52,7 +53,11 @@ ui/             — 渲染抽象（终端、Markdown）
 阶段 7: 插件贡献 hooks / MCP server / runtime extensions（待实现）
 ```
 
-**阶段 6 边界：** `PAICLI_AUTO_SKILLS=1` 时，普通输入前用 LLM selector 在 project skills 和 enabled plugin skills 中选择 0/1 个 skill；selector 只看 `name/source/description/argument_hint` metadata，不读取完整 `SKILL.md`；命中时终端打印自动加载的 skill 和原因。默认关闭，不做多 skill 链式加载、向量库、长期偏好学习或自动启用插件。
+**阶段 6 边界：** `PAICLI_AUTO_SKILLS=1` 时，普通输入前用 LLM selector 在 project / enabled plugin / external / global skills 中选择 0/1 个 skill；selector 只看 `name/source/description/when_to_use/argument_hint` metadata，不读取完整 `SKILL.md`；命中时终端打印自动加载的 skill 和原因。默认关闭，不做多 skill 链式加载、向量库、长期偏好学习或自动启用插件。
+
+**长期记忆建议边界：** `PAICLI_MEMORY_SUGGESTIONS=1` 时，普通输入完成后可由 `MemorySuggestionService` 生成 0/1 个长期记忆候选；候选必须经用户确认后才写入 `memory/`。默认关闭，不做后台抽取、不从 branch/compaction summary 自动写入、不允许插件直接写长期记忆文件。
+
+**长期记忆工具边界：** ReplRouter 会注册 `propose_memory` 工具，让模型在执行过程中提出长期记忆候选；工具先校验类型、空文本和重复事实，再询问用户，确认后才调用 `TextLongTermMemory.remember(...)`。模型、插件、skill、MCP、hook 都不能绕过该工具直接写 `memory/*.md`。
 
 **运行期收拢边界：** 后续插件贡献的 hooks、MCP server、runtime extension contributions 应优先挂到 `app_runtime` 入口，而不是继续散落在 runner/router 里。
 
@@ -83,7 +88,7 @@ LLM 走 OpenAI 兼容 API，配置走环境变量（`OPENAI_API_KEY` / `API_URL`
 ## 已知问题
 
 - LLM 客户端已拆到 `llm/client.py`，消息/响应模型放在 `llm/types.py`
-- 短期 memory / JSON 长期记忆已退出主路径；会话事实在 session 树里，长期事实在 `long_term.md`，压缩 token 估算优先使用 `tiktoken`
+- 短期 memory / JSON 长期记忆已退出主路径；会话事实在 session 树里，长期事实由 `memory/` 包写入结构化目录，压缩 token 估算优先使用 `tiktoken`
 - 根目录旧入口/兼容文件已删除；旧 Plan / Task / Planner 包已退出主路径
 
 ## LSP / 类型检查

@@ -18,15 +18,22 @@ from agent.react_agent import ReactAgent
 from app_runtime import AppRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
+from memory import MemoryProposal, TextLongTermMemory
 from sessions import (
     BranchSummaryEntry,
     CompactionEntry,
     CompactionResult,
     RuntimeContextBuilder,
     SessionStore,
-    TextLongTermMemory,
 )
-from skills import SkillDefinition, SkillRegistry, SkillRoot, SkillSelection, SkillSelector
+from skills import (
+    SkillDefinition,
+    SkillRegistry,
+    SkillRoot,
+    SkillSelection,
+    SkillSelector,
+    auto_skill_candidates,
+)
 from plugin_runtime import PluginManager, PluginStateStore
 from tooling import (
     BashTool,
@@ -86,6 +93,16 @@ class ModuleLayoutTests(unittest.TestCase):
 
         self.assertEqual(list((root / "memory_pythonic").glob("*.py")), [])
 
+    def test_memory_is_split_out_of_sessions_package(self):
+        root = Path(__file__).resolve().parents[1]
+
+        self.assertTrue((root / "memory" / "__init__.py").exists())
+        self.assertFalse((root / "memory" / "suggestions.py").exists())
+        sessions_init = (root / "sessions" / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("TextLongTermMemory", sessions_init)
+        self.assertFalse((root / "sessions" / "long_term.py").exists())
+        self.assertFalse((root / "sessions" / "memory_suggestions.py").exists())
+
 
 class SkillRegistryTests(unittest.TestCase):
     def test_scan_discovers_skill_frontmatter(self):
@@ -98,6 +115,7 @@ class SkillRegistryTests(unittest.TestCase):
                     "---",
                     "name: code-review",
                     "description: Review code changes for bugs and risky behavior.",
+                    "when_to_use: Use when the user asks for a code review.",
                     "disable-model-invocation: true",
                     "argument-hint: [scope]",
                     "---",
@@ -120,6 +138,7 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertEqual(skill.directory_name, "code-review")
         self.assertEqual(skill.source, "project")
         self.assertEqual(skill.description, "Review code changes for bugs and risky behavior.")
+        self.assertEqual(skill.when_to_use, "Use when the user asks for a code review.")
         self.assertTrue(skill.disable_model_invocation)
         self.assertEqual(skill.argument_hint, "[scope]")
         self.assertEqual(skill.path.name, "SKILL.md")
@@ -993,7 +1012,7 @@ class RuntimeContextBuilderTests(unittest.TestCase):
             fork_point = session.append_message(Message(role="assistant", content="fork"))
             session.append_message(Message(role="user", content="短期对话不应该重复注入"))
             session.branch_to_with_summary(fork_point.id, summary="用户正在重构 session 和 memory。")
-            long_term = TextLongTermMemory(session.path.parent.parent / "long_term.md")
+            long_term = TextLongTermMemory(session.path.parent.parent / "memory")
             long_term.remember("用户偏好：普通输入走 React")
 
             context = RuntimeContextBuilder(session=session, long_term=long_term).build("React 入口")
@@ -1694,6 +1713,7 @@ class CliAgentTests(unittest.TestCase):
                 skill_dir,
                 name="brainstorming",
                 description="Explore requirements before implementation.",
+                when_to_use="Use before implementing a new feature.",
                 body="SECRET BODY SHOULD NOT BE SENT TO SELECTOR.",
                 argument_hint="[feature idea]",
             )
@@ -1715,8 +1735,60 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(selection.reason, "需要先澄清新功能")
         self.assertIn("superpowers:brainstorming", prompt)
         self.assertIn("Explore requirements before implementation.", prompt)
+        self.assertIn("Use before implementing a new feature.", prompt)
         self.assertIn("[feature idea]", prompt)
         self.assertNotIn("SECRET BODY SHOULD NOT BE SENT TO SELECTOR.", prompt)
+
+    def test_auto_skill_candidates_include_global_and_external_skills(self):
+        root = Path("E:/demo")
+        skills = [
+            SkillDefinition(
+                name="frontend-design",
+                description="Frontend design.",
+                path=root / "global" / "SKILL.md",
+                directory_name="frontend-design",
+                source="global",
+            ),
+            SkillDefinition(
+                name="docs",
+                description="Docs.",
+                path=root / "external" / "SKILL.md",
+                directory_name="docs",
+                source="external:1",
+            ),
+            SkillDefinition(
+                name="internal",
+                description="Internal.",
+                path=root / "internal" / "SKILL.md",
+                directory_name="internal",
+                source="internal",
+            ),
+        ]
+
+        candidates = auto_skill_candidates(skills)
+
+        self.assertEqual([skill.name for skill in candidates], ["docs", "frontend-design"])
+
+    def test_auto_skill_candidates_prefer_project_over_global_duplicate(self):
+        root = Path("E:/demo")
+        global_skill = SkillDefinition(
+            name="frontend-design",
+            description="Global frontend design.",
+            path=root / "global" / "SKILL.md",
+            directory_name="frontend-design",
+            source="global",
+        )
+        project_skill = SkillDefinition(
+            name="frontend-design",
+            description="Project frontend design.",
+            path=root / "project" / "SKILL.md",
+            directory_name="frontend-design",
+            source="project",
+        )
+
+        candidates = auto_skill_candidates([global_skill, project_skill])
+
+        self.assertEqual(candidates, [project_skill])
 
     def test_repl_auto_skill_loads_context_and_prints_reason(self):
         import cli_app.router as router
@@ -1860,6 +1932,173 @@ class CliAgentTests(unittest.TestCase):
         self.assertTrue(keep_running)
         self.assertEqual(selector.inputs, [])
         self.assertEqual(agent.inputs, [("普通输入", "")])
+
+    def test_repl_router_has_no_post_turn_memory_suggester(self):
+        import cli_app.router as router
+
+        router_params = inspect.signature(router.ReplRouter).parameters
+        run_params = inspect.signature(router.ReplRouter._run_agent_line).parameters
+
+        self.assertNotIn("memory_suggester", router_params)
+        self.assertNotIn("allow_memory_suggestions", run_params)
+        self.assertFalse(hasattr(router.ReplRouter, "_maybe_suggest_memory"))
+        self.assertFalse(hasattr(router, "_memory_suggestions_enabled"))
+
+    def test_repl_registers_propose_memory_tool(self):
+        import cli_app.router as router
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+                session_store=_StubSessionStore(),
+                long_term_memory=TextLongTermMemory(Path(tmp) / "memory"),
+            )
+            router.ReplRouter(
+                app_runtime=app,
+                renderer=_CaptureRenderer(),
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
+                confirm_memory=lambda suggestion: True,
+            )
+
+        definitions = app.tool_runtime.get_all_definitions()
+        names = [definition["function"]["name"] for definition in definitions]
+        self.assertIn("propose_memory", names)
+        propose_definition = next(
+            definition for definition in definitions
+            if definition["function"]["name"] == "propose_memory"
+        )
+        type_schema = propose_definition["function"]["parameters"]["properties"]["type"]
+        self.assertEqual(type_schema["enum"], ["user", "project", "feedback", "reference"])
+
+    def test_repl_builds_agent_with_propose_memory_guidance(self):
+        import cli_app.router as router
+
+        system_prompts = []
+
+        def build_agent(registry, *, conversation_messages=None, on_message_appended=None):
+            agent = ReactAgent(
+                registry,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+            system_prompts.append(agent.conversation_messages[0].content)
+            return agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+                session_store=_StubSessionStore(),
+                long_term_memory=TextLongTermMemory(Path(tmp) / "memory"),
+            )
+            repl_router = router.ReplRouter(
+                app_runtime=app,
+                renderer=_CaptureRenderer(),
+                build_agent=build_agent,
+                run_agent_once=lambda *args, **kwargs: "assistant reply",
+                confirm_memory=lambda suggestion: True,
+            )
+            keep_running = repl_router.route("普通输入")
+
+        self.assertTrue(keep_running)
+        self.assertEqual(len(system_prompts), 1)
+        self.assertIn("- propose_memory:", system_prompts[0])
+        self.assertIn("用户确认", system_prompts[0])
+        self.assertIn("临时任务状态", system_prompts[0])
+        self.assertIn("会话压缩摘要", system_prompts[0])
+
+    def test_propose_memory_tool_confirms_and_saves_user_approved_memory(self):
+        import cli_app.router as router
+
+        confirmations = []
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = TextLongTermMemory(Path(tmp) / "memory")
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+                session_store=_StubSessionStore(),
+                long_term_memory=memory,
+            )
+            router.ReplRouter(
+                app_runtime=app,
+                renderer=_CaptureRenderer(),
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
+                confirm_memory=lambda item: confirmations.append(item) or True,
+            )
+
+            result = app.tool_runtime.execute("propose_memory", {
+                "type": "feedback",
+                "text": "不要自动从压缩摘要写长期记忆",
+                "reason": "用户明确纠正长期记忆写入边界",
+            })
+            feedback = (Path(tmp) / "memory" / "feedback.md").read_text(encoding="utf-8")
+
+        self.assertIn("已保存长期记忆 [feedback]", result)
+        self.assertEqual(
+            confirmations,
+            [MemoryProposal("feedback", "不要自动从压缩摘要写长期记忆", "用户明确纠正长期记忆写入边界")],
+        )
+        self.assertIn("- 不要自动从压缩摘要写长期记忆", feedback)
+
+    def test_propose_memory_tool_skips_when_user_declines(self):
+        import cli_app.router as router
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = TextLongTermMemory(Path(tmp) / "memory")
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+                session_store=_StubSessionStore(),
+                long_term_memory=memory,
+            )
+            router.ReplRouter(
+                app_runtime=app,
+                renderer=_CaptureRenderer(),
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
+                confirm_memory=lambda suggestion: False,
+            )
+
+            result = app.tool_runtime.execute("propose_memory", {
+                "type": "feedback",
+                "text": "不要自动写长期记忆",
+                "reason": "用户纠正了记忆边界",
+            })
+
+        self.assertIn("已跳过长期记忆", result)
+        self.assertEqual(list(memory), [])
+
+    def test_propose_memory_tool_skips_duplicates_without_confirmation(self):
+        import cli_app.router as router
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = TextLongTermMemory(Path(tmp) / "memory")
+            memory.remember("不要自动写长期记忆", memory_type="feedback")
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=cli.build_registry(),
+                session_store=_StubSessionStore(),
+                long_term_memory=memory,
+            )
+            router.ReplRouter(
+                app_runtime=app,
+                renderer=_CaptureRenderer(),
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
+                confirm_memory=lambda suggestion: self.fail("重复记忆不应询问用户"),
+            )
+
+            result = app.tool_runtime.execute("propose_memory", {
+                "type": "feedback",
+                "text": "不要自动写长期记忆",
+                "reason": "重复候选",
+            })
+
+        self.assertIn("已存在长期记忆", result)
+        self.assertEqual(list(memory), ["不要自动写长期记忆"])
 
     def test_auto_skill_selector_excludes_disabled_plugin_skills(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2082,7 +2321,7 @@ class CliAgentTests(unittest.TestCase):
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
-                patch("cli_app.runner.build_long_term_memory", return_value=TextLongTermMemory(Path(tmp) / "long_term.md")),
+                patch("cli_app.runner.build_long_term_memory", return_value=TextLongTermMemory(Path(tmp) / "memory")),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
                 patch("cli_app.runner.build_agent", return_value=agent),
@@ -2107,12 +2346,12 @@ class CliAgentTests(unittest.TestCase):
 
     def test_build_long_term_memory_uses_project_memory_file_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            default_path = Path(tmp) / "agent_memory" / "long_term.md"
+            default_path = Path(tmp) / "agent_memory" / "memory"
             with patch("cli_app.factories.DEFAULT_LONG_TERM_PATH", default_path):
                 memory = cli.build_long_term_memory()
 
             self.assertEqual(memory.storage_path, default_path)
-            self.assertEqual(memory.storage_path.name, "long_term.md")
+            self.assertEqual(memory.storage_path.name, "memory")
 
     def test_run_once_routes_plain_input_to_react_agent(self):
         react = _StubReactAgent()
@@ -2216,18 +2455,34 @@ class CliAgentTests(unittest.TestCase):
 
     def test_remember_command_writes_long_term_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "long_term.md"
-            memory = cli.build_long_term_memory(path)
+            memory_dir = Path(tmp) / "memory"
+            memory = cli.build_long_term_memory(memory_dir)
 
             message = cli.handle_remember(memory, "/remember 用户偏好：默认使用 React")
 
             self.assertIn("已记住", message)
             self.assertEqual(list(memory), ["用户偏好：默认使用 React"])
-            self.assertEqual(path.read_text(encoding="utf-8").strip(), "- 用户偏好：默认使用 React")
+            self.assertIn(
+                "- 用户偏好：默认使用 React",
+                (memory_dir / "project.md").read_text(encoding="utf-8"),
+            )
+
+    def test_remember_command_accepts_explicit_memory_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            memory_dir = Path(tmp) / "memory"
+            memory = cli.build_long_term_memory(memory_dir)
+
+            message = cli.handle_remember(memory, "/remember feedback 不要自动写长期记忆")
+
+            self.assertIn("已记住", message)
+            self.assertIn(
+                "- 不要自动写长期记忆",
+                (memory_dir / "feedback.md").read_text(encoding="utf-8"),
+            )
 
     def test_memory_status_shows_long_term_count(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory = cli.build_long_term_memory(Path(tmp) / "memory.json")
+            memory = cli.build_long_term_memory(Path(tmp) / "memory")
             memory.remember("用户偏好：默认使用 React")
 
             status = cli.format_memory_status(memory)
@@ -2238,8 +2493,7 @@ class CliAgentTests(unittest.TestCase):
 
     def test_empty_long_term_file_loads_as_empty_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "long_term.md"
-            path.write_text("", encoding="utf-8")
+            path = Path(tmp) / "memory"
 
             memory = cli.build_long_term_memory(path)
 
@@ -2380,6 +2634,15 @@ class _FixedSkillSelector:
         return self.selection
 
 
+def _returning_run_once(output):
+    def run_once(agent, user_input, *, runtime_context_builder=None, renderer=None):
+        context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
+        agent.inputs.append((user_input, context))
+        return output
+
+    return run_once
+
+
 class _StaticRuntimeContextBuilder:
     def __init__(self, context):
         self.context = context
@@ -2485,6 +2748,7 @@ def _write_skill_file(
     description: str,
     body: str,
     argument_hint: str = "",
+    when_to_use: str = "",
 ) -> None:
     skill_dir.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -2492,6 +2756,8 @@ def _write_skill_file(
         f"name: {name}",
         f"description: {description}",
     ]
+    if when_to_use:
+        lines.append(f"when_to_use: {when_to_use}")
     if argument_hint:
         lines.append(f"argument-hint: {argument_hint}")
     lines.extend(["---", "", body])

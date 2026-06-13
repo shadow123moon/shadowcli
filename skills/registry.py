@@ -33,6 +33,7 @@ class SkillDefinition:
     root: Path | None = None
     disable_model_invocation: bool = False
     argument_hint: str = ""
+    when_to_use: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,7 @@ def _read_definition(
         root=root,
         disable_model_invocation=bool(metadata.get("disable-model-invocation", False)),
         argument_hint=str(metadata.get("argument-hint") or ""),
+        when_to_use=str(metadata.get("when_to_use") or metadata.get("when-to-use") or ""),
     )
 
 

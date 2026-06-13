@@ -9,6 +9,7 @@ from .terminal import (
     ask_approval_advice,
     ask_approval_choice,
     ask_branch_navigation_choice,
+    ask_memory_confirmation,
     print_approval_request,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "ask_approval_advice",
     "ask_approval_choice",
     "ask_branch_navigation_choice",
+    "ask_memory_confirmation",
     "print_approval_request",
 ]

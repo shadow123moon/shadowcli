@@ -77,11 +77,34 @@ def auto_skills_enabled(environ: Mapping[str, str] | None = None) -> bool:
 
 
 def auto_skill_candidates(skills: Sequence[SkillDefinition]) -> list[SkillDefinition]:
+    best_by_reference: dict[str, tuple[int, int, SkillDefinition]] = {}
+    for index, skill in enumerate(skills):
+        priority = _auto_skill_source_priority(skill.source)
+        if priority is None:
+            continue
+
+        reference = skill_reference(skill)
+        current = best_by_reference.get(reference)
+        candidate = (priority, index, skill)
+        if current is None or candidate[:2] < current[:2]:
+            best_by_reference[reference] = candidate
+
     return [
         skill
-        for skill in skills
-        if skill.source == "project" or skill.source.startswith("plugin:")
+        for _, _, skill in sorted(best_by_reference.values(), key=lambda item: (item[0], item[1]))
     ]
+
+
+def _auto_skill_source_priority(source: str) -> int | None:
+    if source == "project":
+        return 0
+    if source.startswith("plugin:"):
+        return 1
+    if source.startswith("external:"):
+        return 2
+    if source == "global":
+        return 3
+    return None
 
 
 def skill_reference(skill: SkillDefinition) -> str:
@@ -108,6 +131,7 @@ def _build_selection_payload(user_input: str, skills: Sequence[SkillDefinition])
                 "skill": skill_reference(skill),
                 "source": skill.source,
                 "description": skill.description,
+                "when_to_use": skill.when_to_use,
                 "argument_hint": skill.argument_hint,
             }
             for skill in skills

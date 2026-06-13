@@ -15,7 +15,8 @@ python -m cli_app
 ```text
 普通输入            默认走 ReactAgent
 /plan <任务>        走 ReactAgent 单 Agent 计划执行
-/remember <事实>    写入长期记忆
+/remember <事实>    写入长期记忆，默认归入 project
+/remember <类型> <事实> 写入指定长期记忆类型：user/project/feedback/reference
 /memory             查看长期记忆状态
 /tree               查看最近会话节点
 /jump <entry_id>    跳转到旧消息
@@ -107,11 +108,33 @@ cli_app /compact
 ```text
 普通输入 + PAICLI_AUTO_SKILLS=1
   -> AppRuntime.select_auto_skill(...)
-  -> SkillSelector 只看 project/enabled plugin skill metadata
+  -> SkillSelector 只看 project/enabled plugin/external/global skill metadata
+     (name/source/description/when_to_use/argument_hint)
   -> 选择 0/1 个 skill
   -> 命中时 AppRuntime.build_skill_context_for_definition(...)
   -> SkillContextBuilder 注入 skill body
   -> ReactAgent 执行原始输入
+```
+
+长期记忆建议：
+
+```text
+普通输入 + PAICLI_MEMORY_SUGGESTIONS=1
+  -> ReactAgent 正常完成本轮回答
+  -> MemorySuggestionService 只看本轮 user/assistant 文本和已有长期记忆
+  -> 生成 0/1 个 user/project/feedback/reference 候选
+  -> 终端询问用户是否保存
+  -> 用户确认后才调用 TextLongTermMemory.remember(...)
+```
+
+长期记忆工具：
+
+```text
+ReactAgent 执行中
+  -> 调用 propose_memory(type, text, reason)
+  -> ProposeMemoryTool 校验类型/空文本/重复事实
+  -> 终端询问用户是否保存
+  -> 用户确认后才调用 TextLongTermMemory.remember(...)
 ```
 
 插件 skill 贡献：
@@ -148,7 +171,8 @@ cli_app /plugin enable|disable <name>
 | `cli_app/` | 交互入口、命令路由、日志初始化、Agent 事件路由 |
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
-| `sessions/` | 按项目目录隔离的 append-only 会话树，以及 markdown 长期事实清单 |
+| `sessions/` | 按项目目录隔离的 append-only 会话树、分支跳转、branch summary 和 compaction |
+| `memory/` | 结构化长期记忆存储、`MemorySuggestionService`、`propose_memory` 工具和长期记忆写入规则 |
 | `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，管理 `.agents/plugins.json` 启用状态，当前只加载 enabled 插件的 skill contributions |
 | `skills/` | 发现、加载并格式化 `SKILL.md` / `skill.md` 上下文 |
 | `tooling/` | 工具基类、具体工具、工具注册中心、ToolRuntime；默认 hook 安装入口在 AppRuntime/HookManager |
@@ -160,8 +184,15 @@ Session 和长期记忆分层：
 
 ```text
 Session        = 完整会话树，可恢复当前 branch，按项目目录隔离
-TextLongTermMemory = 用户通过 /remember 主动保存的 markdown bullet 事实清单
-RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和 long_term 现算
+TextLongTermMemory = 用户确认后保存的结构化 markdown 长期记忆
+RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和长期记忆现算
+```
+
+代码边界：
+
+```text
+sessions/ = messages.jsonl、leaf、branch_summary、compaction
+memory/   = MEMORY.md、user/project/feedback/reference、建议和写入 policy
 ```
 
 会话存储默认目录：
@@ -169,7 +200,12 @@ RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和 lo
 ```text
 ~/.pai_cli/sessions/<project_key>/
   project.json
-  long_term.md
+  memory/
+    MEMORY.md
+    user.md
+    project.md
+    feedback.md
+    reference.md
   conversations/<session_id>/
     meta.json
     messages.jsonl
@@ -179,7 +215,7 @@ RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和 lo
 
 ```text
 messages.jsonl = session_header / message / leaf / branch_summary / compaction 事件流
-long_term.md   = 项目级长期事实，/remember 追加 "- 事实"
+memory/        = 结构化长期记忆目录，MEMORY.md 为索引，分类文件保存 bullet 事实
 ```
 
 Session 只追加，不改旧 entry。`leaf` 表示当前分支位置；`branch_summary` 是树上的节点，不是 sidecar 文件。System prompt 和 RuntimeContextBuilder 生成的 system context 都是运行时构造的临时视图，不作为普通消息写入 `messages.jsonl`。普通输入和 `/plan` 都通过同一个 `ReactAgent` 执行，`/plan` 只是单 Agent 的计划执行提示。
@@ -198,9 +234,15 @@ SessionManager                     -> branch_to 或 branch_to_with_summary
 
 ```text
 /remember <事实>
+/remember user <事实>
+/remember project <事实>
+/remember feedback <事实>
+/remember reference <事实>
+propose_memory 工具候选 + 用户确认
 ```
 
-普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。
+普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答、branch summary 或 compaction summary 里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。旧 `long_term.md` 格式已放弃，不再读取、导入或写入；新路径必须是结构化 `memory/` 目录。
+如需让模型在普通对话结束后提出长期记忆候选，可设置 `PAICLI_MEMORY_SUGGESTIONS=1`；候选必须经用户确认后才会写入。`propose_memory` 工具默认可见，但它只能提出候选，不能绕过确认直接写入。
 
 ## 运行时 Hooks
 
@@ -252,6 +294,7 @@ PAICLI_LOG_LEVEL=WARNING
 PAICLI_DEBUG_LOG=1
 PAICLI_COMMAND_TIMEOUT_SECONDS=120
 PAICLI_AUTO_SKILLS=1
+PAICLI_MEMORY_SUGGESTIONS=1
 ```
 
 `/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局 debug 日志。
@@ -305,8 +348,11 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | `/plan` 单 Agent | 已接入 |
 | 工具调用 | 统一走 `ToolRegistry.execute()` |
 | 运行时 hooks | 默认只保留 freshness guard；HITL / AI reviewer 审批层已移除 |
-| Session/长期记忆 | 已接入，session 实时记录会话树，长期记忆写入 `long_term.md` |
-| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择 |
+| Session | 已接入，实时记录会话树、分支摘要和压缩节点 |
+| 长期记忆 | 已接入，代码包为 `memory/`，数据写入项目级 `memory/` 结构化目录 |
+| 长期记忆建议 | 已接入，`PAICLI_MEMORY_SUGGESTIONS=1` 时普通对话后可生成候选，用户确认后才写入 |
+| 长期记忆工具 | 已接入，`propose_memory` 允许 Agent 执行中提出候选，经类型/重复校验和用户确认后才写入 |
+| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择，候选含 project / enabled plugin / external / global，并使用 `when_to_use` metadata 辅助判断 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
 | Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `PAICLI_PLUGIN_ROOTS` 外部插件 root |
 | Plugin state | 已接入；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 经 AppStateStore 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` 和自动 skill 候选 |

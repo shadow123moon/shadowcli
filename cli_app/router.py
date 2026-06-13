@@ -7,6 +7,7 @@ from typing import Any
 from agent import ReactAgent
 from app_runtime import AppRuntime
 from llm import chat as default_chat
+from memory import MemoryProposal, ProposeMemoryTool
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
 from skills import (
@@ -42,6 +43,7 @@ from ui import (
     BranchNavigationChoice,
     Renderer,
     ask_branch_navigation_choice,
+    ask_memory_confirmation,
 )
 
 DEFAULT_SKILL_TASK = "按 skill 指令执行"
@@ -82,6 +84,7 @@ class ReplRouter:
         skill_selector: SkillSelector | None = None,
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
+        confirm_memory: Callable[[MemoryProposal], bool] = ask_memory_confirmation,
     ) -> None:
         self.app_runtime = app_runtime
         self.runtime = app_runtime.tool_runtime
@@ -95,6 +98,8 @@ class ReplRouter:
         self.skill_selector = skill_selector
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
+        self.confirm_memory = confirm_memory
+        _register_propose_memory_tool(self.runtime, self.long_term, confirm_memory=self.confirm_memory)
 
         self.session: SessionManager | None = None
         self.agent: ReactAgent | None = None
@@ -290,7 +295,12 @@ class ReplRouter:
             renderer=self.renderer,
         )
 
-    def _run_agent_line(self, line: str, *, allow_auto_skill: bool = True) -> None:
+    def _run_agent_line(
+        self,
+        line: str,
+        *,
+        allow_auto_skill: bool = True,
+    ) -> None:
         selection = self._select_auto_skill(line) if allow_auto_skill else None
         active_session, active_agent, context_builder = self.ensure_session()
         self.runtime_context_builder = self._prepare_agent_run(
@@ -518,3 +528,11 @@ def _format_auto_skill_selection(selection: SkillSelection) -> str:
         f"自动加载 skill: {skill_reference(selection.skill)}",
         f"原因: {reason}",
     ])
+
+
+def _register_propose_memory_tool(runtime: Any, long_term: Any, *, confirm_memory: Callable[[MemoryProposal], bool]) -> None:
+    registry = getattr(runtime, "registry", None)
+    register = getattr(registry, "register", None)
+    if register is None:
+        return
+    register(ProposeMemoryTool(long_term, confirm_memory=confirm_memory))
