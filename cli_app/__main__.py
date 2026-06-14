@@ -4,7 +4,7 @@ from .runner import repl
 
 
 def main() -> int:
-    """PaiCLI 入口：启动终端 REPL"""
+    """ShadowCLI 入口：启动终端 REPL"""
     return repl()
 
 

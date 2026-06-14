@@ -106,7 +106,7 @@ cli_app /compact
 自动 skill 选择：
 
 ```text
-普通输入 + PAICLI_AUTO_SKILLS=1
+普通输入 + SHADOWCLI_AUTO_SKILLS=1
   -> AppRuntime.select_auto_skill(...)
   -> SkillSelector 只看 project/enabled plugin/external/global skill metadata
      (name/source/description/when_to_use/argument_hint)
@@ -114,17 +114,6 @@ cli_app /compact
   -> 命中时 AppRuntime.build_skill_context_for_definition(...)
   -> SkillContextBuilder 注入 skill body
   -> ReactAgent 执行原始输入
-```
-
-长期记忆建议：
-
-```text
-普通输入 + PAICLI_MEMORY_SUGGESTIONS=1
-  -> ReactAgent 正常完成本轮回答
-  -> MemorySuggestionService 只看本轮 user/assistant 文本和已有长期记忆
-  -> 生成 0/1 个 user/project/feedback/reference 候选
-  -> 终端询问用户是否保存
-  -> 用户确认后才调用 TextLongTermMemory.remember(...)
 ```
 
 长期记忆工具：
@@ -141,7 +130,7 @@ ReactAgent 执行中
 
 ```text
 plugins/<id>/.codex-plugin/plugin.json
-PAICLI_PLUGIN_ROOTS=<external plugin root>
+SHADOWCLI_PLUGIN_ROOTS=<external plugin root>
   -> PluginManager 校验 manifest
      - name 必须是 kebab-case
      - skills path 必须相对插件根并以 ./ 开头
@@ -172,7 +161,7 @@ cli_app /plugin enable|disable <name>
 | `agent/` | 默认 ReAct 对话入口、共享 AgentLoop、预算和主线 prompt；只产生事件，不直接打印 |
 | `ui/` | 用户可见终端输出和输入 |
 | `sessions/` | 按项目目录隔离的 append-only 会话树、分支跳转、branch summary 和 compaction |
-| `memory/` | 结构化长期记忆存储、`MemorySuggestionService`、`propose_memory` 工具和长期记忆写入规则 |
+| `memory/` | 结构化长期记忆存储、`propose_memory` 工具和长期记忆写入规则 |
 | `plugin_runtime/` | 读取项目插件和外部插件 root 的 manifest，管理 `.agents/plugins.json` 启用状态，当前只加载 enabled 插件的 skill contributions |
 | `skills/` | 发现、加载并格式化 `SKILL.md` / `skill.md` 上下文 |
 | `tooling/` | 工具基类、具体工具、工具注册中心、ToolRuntime；默认 hook 安装入口在 AppRuntime/HookManager |
@@ -192,13 +181,13 @@ RuntimeContextBuilder = 运行时上下文视图，从当前 branch 摘要和长
 
 ```text
 sessions/ = messages.jsonl、leaf、branch_summary、compaction
-memory/   = MEMORY.md、user/project/feedback/reference、建议和写入 policy
+memory/   = MEMORY.md、user/project/feedback/reference、写入工具和去重/search policy
 ```
 
 会话存储默认目录：
 
 ```text
-~/.pai_cli/sessions/<project_key>/
+~/.shadowcli/sessions/<project_key>/
   project.json
   memory/
     MEMORY.md
@@ -241,8 +230,7 @@ SessionManager                     -> branch_to 或 branch_to_with_summary
 propose_memory 工具候选 + 用户确认
 ```
 
-普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答、branch summary 或 compaction summary 里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。旧 `long_term.md` 格式已放弃，不再读取、导入或写入；新路径必须是结构化 `memory/` 目录。
-如需让模型在普通对话结束后提出长期记忆候选，可设置 `PAICLI_MEMORY_SUGGESTIONS=1`；候选必须经用户确认后才会写入。`propose_memory` 工具默认可见，但它只能提出候选，不能绕过确认直接写入。
+普通对话只写入 session，不再维护短期 memory。长期记忆不自动从模型回答、branch summary 或 compaction summary 里抽取事实，避免把不确定回答、临时日志和推理过程污染成长记忆。旧 `long_term.md` 格式已放弃，不再读取、导入或写入；新路径必须是结构化 `memory/` 目录。`propose_memory` 工具默认可见，但它只能提出候选，不能绕过确认直接写入。
 
 ## 运行时 Hooks
 
@@ -281,7 +269,7 @@ find   查找文件
 
 ```text
 用户可见内容 -> ui/terminal.py
-开发调试信息 -> logging / PAICLI_DEBUG_LOG
+开发调试信息 -> logging / SHADOWCLI_DEBUG_LOG
 会话事实     -> sessions/.../messages.jsonl
 ```
 
@@ -290,11 +278,10 @@ find   查找文件
 环境变量：
 
 ```text
-PAICLI_LOG_LEVEL=WARNING
-PAICLI_DEBUG_LOG=1
-PAICLI_COMMAND_TIMEOUT_SECONDS=120
-PAICLI_AUTO_SKILLS=1
-PAICLI_MEMORY_SUGGESTIONS=1
+SHADOWCLI_LOG_LEVEL=WARNING
+SHADOWCLI_DEBUG_LOG=1
+SHADOWCLI_COMMAND_TIMEOUT_SECONDS=120
+SHADOWCLI_AUTO_SKILLS=1
 ```
 
 `/plan` 当前不再创建旧的 `logs/plans/` 计划日志；它走普通 `ReactAgent` 工具循环和全局 debug 日志。
@@ -350,11 +337,10 @@ debug/artifacts/       测试输出、截图、临时压缩包等产物
 | 运行时 hooks | 默认只保留 freshness guard；HITL / AI reviewer 审批层已移除 |
 | Session | 已接入，实时记录会话树、分支摘要和压缩节点 |
 | 长期记忆 | 已接入，代码包为 `memory/`，数据写入项目级 `memory/` 结构化目录 |
-| 长期记忆建议 | 已接入，`PAICLI_MEMORY_SUGGESTIONS=1` 时普通对话后可生成候选，用户确认后才写入 |
 | 长期记忆工具 | 已接入，`propose_memory` 允许 Agent 执行中提出候选，经类型/重复校验和用户确认后才写入 |
-| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`PAICLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择，候选含 project / enabled plugin / external / global，并使用 `when_to_use` metadata 辅助判断 |
+| Skills | 命令化已接入；默认扫描项目、外部/env、全局 skill roots，插件 skills 必须经 `.codex-plugin/plugin.json` manifest 声明；`SHADOWCLI_AUTO_SKILLS=1` 可开启默认关闭的 0/1 自动 skill 选择，候选含 project / enabled plugin / external / global，并使用 `when_to_use` metadata 辅助判断 |
 | Skill compatibility | 已支持 `SKILL.md` / `skill.md`、UTF-8 BOM、折叠 frontmatter description、坏 skill 诊断跳过，以及无参数 `/skill <name>` |
-| Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `PAICLI_PLUGIN_ROOTS` 外部插件 root |
+| Plugin format | 已兼容 Codex 风格 `.codex-plugin/plugin.json`、kebab-case `name`、以 `./` 开头的 manifest path、`skills` 字符串/列表/对象声明，以及 `SHADOWCLI_PLUGIN_ROOTS` 外部插件 root |
 | Plugin state | 已接入；插件默认禁用，`/plugins` 可查看，`/plugin enable/disable` 经 AppStateStore 写入 `.agents/plugins.json`，enabled 插件 skills 才会进入 `/skills` 和自动 skill 候选 |
 | AppRuntime/EventBus | 已接入薄层；runner 通过 AppRuntime 统一组装 tool/hook/state/session/memory/skill/event 资源，默认工具 hooks 经 HookManager 安装，插件状态经 AppStateStore 读写，运行前自动压缩和手动 `/compact` 经 SessionRuntime，插件启用/禁用、自动 skill 选择和显式/自动 skill 的 context 组装经 SkillManager，EventBus 先作为运行期事件入口 |
 | 项目检索 | 使用 `ls` / `grep` / `find` / `read`，不再维护 RAG 索引 |

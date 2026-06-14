@@ -25,7 +25,7 @@ class ReadTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "text"
-    guidance = "PaiCLI read 工具，用于读取文件内容并显示行号；编辑已有文件前先 read，大文件用 offset/limit 分段读取。"
+    guidance = "ShadowCLI read 工具，用于读取文件内容并显示行号；编辑已有文件前先 read，大文件用 offset/limit 分段读取。"
 
     @property
     def name(self):
@@ -199,7 +199,7 @@ class WriteTool(Tool):
     effect = "write"
     concurrency_safe = False
     result_kind = "text"
-    guidance = "PaiCLI write 工具，用于创建新文件或完整重写；修改已有文件优先用 edit，覆盖已有文件前必须先 read。"
+    guidance = "ShadowCLI write 工具，用于创建新文件或完整重写；修改已有文件优先用 edit，覆盖已有文件前必须先 read。"
 
     approval_required = False
     approval_level = "🟡 中危"
@@ -260,7 +260,7 @@ class EditTool(Tool):
     effect = "write"
     concurrency_safe = False
     result_kind = "text"
-    guidance = "PaiCLI edit 工具，用于精确替换已有文件文本；old_text 必须完全匹配且默认唯一。"
+    guidance = "ShadowCLI edit 工具，用于精确替换已有文件文本；old_text 必须完全匹配且默认唯一。"
 
     approval_required = False
     approval_level = "🟡 中危"
@@ -344,7 +344,7 @@ class LsTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "file_list"
-    guidance = "PaiCLI ls 工具，这是 Python 目录列表工具，不是终端 ls 命令；用于查看目录结构或单个文件大小。"
+    guidance = "ShadowCLI ls 工具，这是 Python 目录列表工具，不是终端 ls 命令；用于查看目录结构或单个文件大小。"
 
     @property
     def name(self):
@@ -394,7 +394,7 @@ class GrepTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "search_hits"
-    guidance = "PaiCLI grep 工具，这是 Python 搜索工具，不是终端 grep/rg 命令；用于按正则搜索文件内容，按文件名找用 find。"
+    guidance = "ShadowCLI grep 工具，这是 Python 搜索工具，不是终端 grep/rg 命令；用于按正则搜索文件内容，按文件名找用 find。"
 
     @property
     def name(self):
@@ -483,7 +483,7 @@ class FindTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "file_list"
-    guidance = "PaiCLI find 工具，这是 Python 文件名搜索工具，不是终端 find 命令；用于按 glob 文件名模式找文件，按内容搜用 grep。"
+    guidance = "ShadowCLI find 工具，这是 Python 文件名搜索工具，不是终端 find 命令；用于按 glob 文件名模式找文件，按内容搜用 grep。"
 
     @property
     def name(self):

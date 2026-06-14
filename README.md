@@ -28,12 +28,12 @@ python -m cli_app
 - **ReAct Agent** — 工具调用 + 流式输出
 - **会话树** — 支持分支、跳转、自动压缩
 - **Skill 系统** — 14 个内置 skills（brainstorming、TDD、debugging 等）
-- **自动 skill 选择** — 设置 `PAICLI_AUTO_SKILLS=1` 后，根据输入自动加载合适的 skill
+- **自动 skill 选择** — 设置 `SHADOWCLI_AUTO_SKILLS=1` 后，根据输入自动加载合适的 skill
 - **插件管理** — 兼容 Codex `.codex-plugin` 格式
 
 ## 自动 Skill 选择
 
-在 `.env` 中设置 `PAICLI_AUTO_SKILLS=1` 后启用。Agent 会根据你的输入自动选择合适的 skill：
+在 `.env` 中设置 `SHADOWCLI_AUTO_SKILLS=1` 后启用。Agent 会根据你的输入自动选择合适的 skill：
 
 - "我想实现一个新功能" → 自动加载 `brainstorming`
 - "测试报错了" → 自动加载 `systematic-debugging`

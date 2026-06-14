@@ -13,7 +13,7 @@ from llm import ChatResponse, Message, chat
 from .registry import SkillDefinition, SkillRegistry
 
 
-AUTO_SKILLS_ENV = "PAICLI_AUTO_SKILLS"
+AUTO_SKILLS_ENV = "SHADOWCLI_AUTO_SKILLS"
 _ENABLED_VALUES = {"1", "true", "yes", "on"}
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ def skill_reference(skill: SkillDefinition) -> str:
 
 
 _SYSTEM_PROMPT = "\n".join([
-    "你是 PAICLI 的自动 skill selector。",
+    "你是 ShadowCLI 的自动 skill selector。",
     "只根据用户输入和候选 skill metadata 判断是否应自动加载一个 skill。",
     "只有明确匹配时才选择；不确定时返回 null。",
     "最多选择一个 skill。不要调用工具，不要读取 skill body。",

@@ -10,7 +10,7 @@ class WebSearchTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "search_hits"
-    guidance = "PaiCLI web_search 工具，用于搜索互联网并返回标题、摘要和链接；需要读取具体网页正文时再用 web_fetch。"
+    guidance = "ShadowCLI web_search 工具，用于搜索互联网并返回标题、摘要和链接；需要读取具体网页正文时再用 web_fetch。"
 
     @property
     def name(self):
@@ -90,7 +90,7 @@ class WebFetchTool(Tool):
     effect = "read"
     concurrency_safe = True
     result_kind = "web_text"
-    guidance = "PaiCLI web_fetch 工具，用于抓取指定 URL 的网页正文；适合读官方文档、博客和技术文章。"
+    guidance = "ShadowCLI web_fetch 工具，用于抓取指定 URL 的网页正文；适合读官方文档、博客和技术文章。"
 
     @property
     def name(self) -> str:
@@ -122,7 +122,7 @@ class WebFetchTool(Tool):
             resp = requests.get(
                 url,
                 timeout=30,
-                headers={"User-Agent": "Mozilla/5.0 (paicli)"},
+                headers={"User-Agent": "Mozilla/5.0 (shadowcli)"},
             )
             resp.raise_for_status()
         except Exception as e:

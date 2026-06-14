@@ -8,7 +8,7 @@ from typing import Any
 
 SKILL_ENTRYPOINT = "SKILL.md"
 SKILL_ROOT = Path(".agents") / "skills"
-SKILL_ROOTS_ENV = "PAICLI_SKILL_ROOTS"
+SKILL_ROOTS_ENV = "SHADOWCLI_SKILL_ROOTS"
 
 
 @dataclass(frozen=True)

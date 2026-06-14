@@ -103,6 +103,35 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertFalse((root / "sessions" / "long_term.py").exists())
         self.assertFalse((root / "sessions" / "memory_suggestions.py").exists())
 
+    def test_source_and_docs_use_shadowcli_name(self):
+        root = Path(__file__).resolve().parents[1]
+        forbidden = [
+            "Pai" + "CLI",
+            "PAI" + "CLI",
+            "pai" + "cli",
+            "pai" + "_cli",
+        ]
+        checked_suffixes = {".md", ".py"}
+        ignored_dirs = {
+            ".git",
+            "__pycache__",
+            ".pytest_cache",
+            "agent_memory",
+            "logs",
+        }
+
+        offenders = []
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix not in checked_suffixes:
+                continue
+            if any(part in ignored_dirs for part in path.relative_to(root).parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if any(term in text for term in forbidden):
+                offenders.append(str(path.relative_to(root)))
+
+        self.assertEqual(offenders, [])
+
 
 class SkillRegistryTests(unittest.TestCase):
     def test_scan_discovers_skill_frontmatter(self):
@@ -465,7 +494,7 @@ class SkillRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ, {"PAICLI_SKILL_ROOTS": f"superpowers={external_root}"}):
+            with patch.dict(os.environ, {"SHADOWCLI_SKILL_ROOTS": f"superpowers={external_root}"}):
                 skills = SkillRegistry(root).list()
 
         matches = [skill for skill in skills if skill.name == "brainstorming"]
@@ -587,7 +616,7 @@ class PluginManagerTests(unittest.TestCase):
             _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills/")
             PluginStateStore(root).enable("superpowers")
 
-            with patch.dict(os.environ, {"PAICLI_PLUGIN_ROOTS": str(plugin_root)}):
+            with patch.dict(os.environ, {"SHADOWCLI_PLUGIN_ROOTS": str(plugin_root)}):
                 roots = PluginManager(root).skill_roots()
 
         self.assertEqual(roots, [SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve())])
@@ -1138,7 +1167,7 @@ class AgentLoopTests(unittest.TestCase):
             tool_registry=registry,
         )
 
-        with patch.dict(os.environ, {"PAICLI_REACT_TOKEN_BUDGET": "10"}, clear=False):
+        with patch.dict(os.environ, {"SHADOWCLI_REACT_TOKEN_BUDGET": "10"}, clear=False):
             with patch("agent.agent_loop.chat_stream", fake_stream):
                 events = list(agent.execute(Message(role="user", content="读取文件")))
 
@@ -1174,7 +1203,7 @@ class AgentLoopTests(unittest.TestCase):
             tool_registry=registry,
         )
 
-        with patch.dict(os.environ, {"PAICLI_REACT_STAGNATION_WINDOW": "2"}, clear=False):
+        with patch.dict(os.environ, {"SHADOWCLI_REACT_STAGNATION_WINDOW": "2"}, clear=False):
             with patch("agent.agent_loop.chat_stream", fake_stream):
                 events = list(agent.execute(Message(role="user", content="重复读取")))
 
@@ -1823,7 +1852,7 @@ class CliAgentTests(unittest.TestCase):
                 skill_selector=selector,
             )
 
-            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+            with patch.dict(os.environ, {"SHADOWCLI_AUTO_SKILLS": "1"}, clear=False):
                 keep_running = repl_router.route("检查当前改动")
 
         self.assertTrue(keep_running)
@@ -1859,7 +1888,7 @@ class CliAgentTests(unittest.TestCase):
                 skill_selector=selector,
             )
 
-            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+            with patch.dict(os.environ, {"SHADOWCLI_AUTO_SKILLS": "1"}, clear=False):
                 keep_running = repl_router.route("随便聊聊")
 
         self.assertTrue(keep_running)
@@ -1895,7 +1924,7 @@ class CliAgentTests(unittest.TestCase):
                 skill_selector=selector,
             )
 
-            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": "1"}, clear=False):
+            with patch.dict(os.environ, {"SHADOWCLI_AUTO_SKILLS": "1"}, clear=False):
                 keep_running = repl_router.route("/plan 梳理 runtime 架构")
 
         self.assertTrue(keep_running)
@@ -1926,7 +1955,7 @@ class CliAgentTests(unittest.TestCase):
                 skill_selector=selector,
             )
 
-            with patch.dict(os.environ, {"PAICLI_AUTO_SKILLS": ""}, clear=False):
+            with patch.dict(os.environ, {"SHADOWCLI_AUTO_SKILLS": ""}, clear=False):
                 keep_running = repl_router.route("普通输入")
 
         self.assertTrue(keep_running)
@@ -2317,7 +2346,7 @@ class CliAgentTests(unittest.TestCase):
 
             import cli_app.runner as runner
             with (
-                patch.dict(os.environ, {"PAICLI_COMPACT_MAX_TOKENS": "1"}, clear=False),
+                patch.dict(os.environ, {"SHADOWCLI_COMPACT_MAX_TOKENS": "1"}, clear=False),
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
                 patch("cli_app.runner.build_registry", return_value=runtime),
@@ -2408,8 +2437,8 @@ class CliAgentTests(unittest.TestCase):
         errors = io.StringIO()
 
         with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("PAICLI_LOG_LEVEL", None)
-            os.environ.pop("PAICLI_DEBUG_LOG", None)
+            os.environ.pop("SHADOWCLI_LOG_LEVEL", None)
+            os.environ.pop("SHADOWCLI_DEBUG_LOG", None)
             with contextlib.redirect_stderr(errors):
                 cli.configure_logging()
                 logging.getLogger("tests.console").info("internal info")
@@ -2425,8 +2454,8 @@ class CliAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             debug_path = Path(tmp) / "debug.log"
             with _isolated_root_logger(), patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("PAICLI_LOG_LEVEL", None)
-                os.environ.pop("PAICLI_DEBUG_LOG", None)
+                os.environ.pop("SHADOWCLI_LOG_LEVEL", None)
+                os.environ.pop("SHADOWCLI_DEBUG_LOG", None)
                 with contextlib.redirect_stderr(errors):
                     cli.configure_logging(debug_log_path=debug_path)
                     logging.getLogger("tests.debug.file").debug("deep debug detail")
@@ -3009,11 +3038,11 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("禁止使用 Linux 命令", tool.parameters["properties"]["command"]["description"])
         self.assertIn("PowerShell 语法", tool.parameters["properties"]["command"]["description"])
 
-    def test_bash_guidance_distinguishes_shell_from_paicli_commands(self):
+    def test_bash_guidance_distinguishes_shell_from_shadowcli_commands(self):
         guidance = BashTool().guidance
 
         self.assertIn("PowerShell", guidance)
-        self.assertIn("PaiCLI slash 命令", guidance)
+        self.assertIn("ShadowCLI slash 命令", guidance)
         self.assertIn("/skill", guidance)
         self.assertIn("不要通过 bash", guidance)
 
@@ -3151,12 +3180,12 @@ class PiStyleToolTests(unittest.TestCase):
                 self.assertEqual(tool.concurrency_safe, concurrency_safe)
                 self.assertEqual(tool.result_kind, result_kind)
 
-    def test_file_search_guidance_names_paicli_tools_not_shell_commands(self):
-        self.assertIn("PaiCLI ls 工具", LsTool().guidance)
+    def test_file_search_guidance_names_shadowcli_tools_not_shell_commands(self):
+        self.assertIn("ShadowCLI ls 工具", LsTool().guidance)
         self.assertIn("不是终端 ls 命令", LsTool().guidance)
-        self.assertIn("PaiCLI grep 工具", GrepTool().guidance)
+        self.assertIn("ShadowCLI grep 工具", GrepTool().guidance)
         self.assertIn("不是终端 grep/rg 命令", GrepTool().guidance)
-        self.assertIn("PaiCLI find 工具", FindTool().guidance)
+        self.assertIn("ShadowCLI find 工具", FindTool().guidance)
         self.assertIn("不是终端 find 命令", FindTool().guidance)
 
     def test_registry_executes_pi_style_tools_through_same_entrypoint(self):

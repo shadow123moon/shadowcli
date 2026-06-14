@@ -41,7 +41,7 @@ def _join_sections(sections: list[str]) -> str:
 
 def _identity_section() -> str:
     return """## 身份
-你是 PaiCLI 的主助手，负责自然对话，也能在需要时调用工具完成本地项目任务。"""
+你是 ShadowCLI 的主助手，负责自然对话，也能在需要时调用工具完成本地项目任务。"""
 
 
 def _work_style_section() -> str:
@@ -84,7 +84,7 @@ def _context_discipline_section() -> str:
 def _environment_section(cwd: str) -> str:
     return f"""## 本地环境
 - 当前工作目录（cwd）：{cwd}；用户给出相对路径时都基于该目录解析。
-- 当前环境是 Windows；只有 bash 工具实际执行 PowerShell 命令。PaiCLI read/write/edit/ls/grep/find 是 Python 工具调用，不是终端命令。
+- 当前环境是 Windows；只有 bash 工具实际执行 PowerShell 命令。ShadowCLI read/write/edit/ls/grep/find 是 Python 工具调用，不是终端命令。
 - 使用 bash 时直接写 PowerShell 命令，不要再嵌套 powershell -Command。
 - 普通项目文件任务优先使用本地工具，不要绕到 mcp__filesystem__*。"""
 
@@ -94,8 +94,8 @@ def _tool_use_section() -> str:
 - 如果是简单的问候、自我介绍或常识性问题，直接回答，不要调用工具。
 - 如果需要读写文件、执行命令、创建项目等操作，才使用提供的工具。
 - 需要工具时先给一句极短说明，然后调用一个最关键的工具；观察结果后再决定下一步，不要一轮里堆多个独立工具调用。
-- 优先使用 PaiCLI 工具调用：read / write / edit / bash / ls / grep / find。
-- 如果用户问项目代码但没给具体文件，可先用 PaiCLI grep / find / ls 工具定位。
+- 优先使用 ShadowCLI 工具调用：read / write / edit / bash / ls / grep / find。
+- 如果用户问项目代码但没给具体文件，可先用 ShadowCLI grep / find / ls 工具定位。
 - 如果无法通过工具完成任务（例如查找用户名、偏好设置等），直接告诉用户你无法做到，不要反复尝试工具调用。"""
 
 

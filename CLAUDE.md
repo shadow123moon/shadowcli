@@ -48,14 +48,12 @@ ui/             — 渲染抽象（终端、Markdown）
 阶段 3: plugin manifest -> skill contributions，已完成
 阶段 4: 市面 skill/plugin 格式适配，已完成
 阶段 5: 插件启用/禁用/状态管理，已完成
-阶段 6: 隐式 skill 选择（PAICLI_AUTO_SKILLS=1），已完成最小版
+阶段 6: 隐式 skill 选择（SHADOWCLI_AUTO_SKILLS=1），已完成最小版
 运行期收拢: AppRuntime + EventBus + HookManager + AppStateStore + SessionRuntime + SkillManager，已完成
 阶段 7: 插件贡献 hooks / MCP server / runtime extensions（待实现）
 ```
 
-**阶段 6 边界：** `PAICLI_AUTO_SKILLS=1` 时，普通输入前用 LLM selector 在 project / enabled plugin / external / global skills 中选择 0/1 个 skill；selector 只看 `name/source/description/when_to_use/argument_hint` metadata，不读取完整 `SKILL.md`；命中时终端打印自动加载的 skill 和原因。默认关闭，不做多 skill 链式加载、向量库、长期偏好学习或自动启用插件。
-
-**长期记忆建议边界：** `PAICLI_MEMORY_SUGGESTIONS=1` 时，普通输入完成后可由 `MemorySuggestionService` 生成 0/1 个长期记忆候选；候选必须经用户确认后才写入 `memory/`。默认关闭，不做后台抽取、不从 branch/compaction summary 自动写入、不允许插件直接写长期记忆文件。
+**阶段 6 边界：** `SHADOWCLI_AUTO_SKILLS=1` 时，普通输入前用 LLM selector 在 project / enabled plugin / external / global skills 中选择 0/1 个 skill；selector 只看 `name/source/description/when_to_use/argument_hint` metadata，不读取完整 `SKILL.md`；命中时终端打印自动加载的 skill 和原因。默认关闭，不做多 skill 链式加载、向量库、长期偏好学习或自动启用插件。
 
 **长期记忆工具边界：** ReplRouter 会注册 `propose_memory` 工具，让模型在执行过程中提出长期记忆候选；工具先校验类型、空文本和重复事实，再询问用户，确认后才调用 `TextLongTermMemory.remember(...)`。模型、插件、skill、MCP、hook 都不能绕过该工具直接写 `memory/*.md`。
 

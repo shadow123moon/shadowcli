@@ -1,7 +1,7 @@
 from pathlib import Path
 
 BANNER = (
-    "PaiCLI\n"
+    "ShadowCLI\n"
     "ctrl+c 中断 · ctrl+d 退出 · / 命令 · /new 新对话 · /resume 历史对话\n"
     "首条消息会创建新对话"
 )

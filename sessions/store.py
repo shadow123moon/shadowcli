@@ -11,7 +11,7 @@ from .repository import SessionRepository
 from .types import DEFAULT_SESSION_TITLE, ProjectMeta, SESSION_VERSION, SessionMeta, title_from_text
 
 
-DEFAULT_SESSION_ROOT = Path.home() / ".pai_cli" / "sessions"
+DEFAULT_SESSION_ROOT = Path.home() / ".shadowcli" / "sessions"
 
 
 class SessionStore:

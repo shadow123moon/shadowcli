@@ -3,7 +3,7 @@
 ## 实现内容
 
 ### 1. 核心模块 (mcp_integration/)
-- ✅ `config.py` - 配置加载,支持 ~/.paicli/mcp.json
+- ✅ `config.py` - 配置加载,支持 ~/.shadowcli/mcp.json
 - ✅ `manager.py` - 后台 event loop + 同步接口适配
 - ✅ `sanitizer.py` - inputSchema 清洗
 - ✅ `wrapper.py` - MCP 工具包装成 Tool 接口
@@ -44,7 +44,7 @@
 
 ### 1. 配置 MCP server
 
-编辑 `~/.paicli/mcp.json`:
+编辑 `~/.shadowcli/mcp.json`:
 
 ```json
 {

@@ -14,8 +14,8 @@ class BashTool(Tool):
     concurrency_safe = False
     result_kind = "command_output"
     guidance = (
-        "bash 工具只用于执行真正的本机 PowerShell 命令；不要通过 bash 调 PaiCLI 工具"
-        "（read/write/edit/ls/grep/find）或 PaiCLI slash 命令（/skill、/plugin、/tree、/jump、/compact），"
+        "bash 工具只用于执行真正的本机 PowerShell 命令；不要通过 bash 调 ShadowCLI 工具"
+        "（read/write/edit/ls/grep/find）或 ShadowCLI slash 命令（/skill、/plugin、/tree、/jump、/compact），"
         "这些不是终端命令。"
     )
 
@@ -82,7 +82,7 @@ class BashTool(Tool):
 def _command_timeout(raw_timeout) -> int:
     """解析超时时间：参数 > 环境变量 > 默认值"""
     try:
-        timeout = int(raw_timeout or os.getenv("PAICLI_COMMAND_TIMEOUT_SECONDS") or DEFAULT_COMMAND_TIMEOUT_SECONDS)
+        timeout = int(raw_timeout or os.getenv("SHADOWCLI_COMMAND_TIMEOUT_SECONDS") or DEFAULT_COMMAND_TIMEOUT_SECONDS)
     except (TypeError, ValueError):
         return DEFAULT_COMMAND_TIMEOUT_SECONDS
     return max(1, timeout)

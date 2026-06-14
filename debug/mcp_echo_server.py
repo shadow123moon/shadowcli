@@ -4,7 +4,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 
-server = FastMCP("paicli-lifecycle-test")
+server = FastMCP("shadowcli-lifecycle-test")
 
 
 @server.tool()

@@ -17,7 +17,7 @@ from .state import PluginStateStore
 
 
 PLUGIN_ROOT = "plugins"
-PLUGIN_ROOTS_ENV = "PAICLI_PLUGIN_ROOTS"
+PLUGIN_ROOTS_ENV = "SHADOWCLI_PLUGIN_ROOTS"
 
 
 class PluginManager:

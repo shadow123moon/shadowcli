@@ -43,9 +43,9 @@ def compact_session(
     chat_fn=chat,
 ) -> CompactionResult:
     default_max_tokens = _default_compact_max_tokens()
-    max_tokens = max_tokens or _read_int_env("PAICLI_COMPACT_MAX_TOKENS", default_max_tokens)
+    max_tokens = max_tokens or _read_int_env("SHADOWCLI_COMPACT_MAX_TOKENS", default_max_tokens)
     default_keep_tokens = max(1, int(max_tokens * DEFAULT_COMPACT_KEEP_RATIO))
-    keep_tokens = keep_tokens or _read_int_env("PAICLI_COMPACT_KEEP_TOKENS", default_keep_tokens)
+    keep_tokens = keep_tokens or _read_int_env("SHADOWCLI_COMPACT_KEEP_TOKENS", default_keep_tokens)
     plan = plan_compaction(
         session,
         max_tokens=max_tokens,
@@ -305,8 +305,8 @@ def _read_float_env(key: str, default: float) -> float:
 
 
 def _default_compact_max_tokens() -> int:
-    context_window = _read_int_env("PAICLI_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS)
-    trigger_ratio = _read_float_env("PAICLI_COMPACT_TRIGGER_RATIO", DEFAULT_COMPACT_TRIGGER_RATIO)
+    context_window = _read_int_env("SHADOWCLI_CONTEXT_WINDOW_TOKENS", DEFAULT_CONTEXT_WINDOW_TOKENS)
+    trigger_ratio = _read_float_env("SHADOWCLI_COMPACT_TRIGGER_RATIO", DEFAULT_COMPACT_TRIGGER_RATIO)
     if trigger_ratio > 1:
         trigger_ratio = DEFAULT_COMPACT_TRIGGER_RATIO
     return max(1, int(context_window * trigger_ratio))

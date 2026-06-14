@@ -47,9 +47,9 @@ class AgentBudget:
     @classmethod
     def from_env(cls) -> AgentBudget:
         return cls(
-            token_budget=_read_int_env("PAICLI_REACT_TOKEN_BUDGET", sys.maxsize),
-            stagnation_window=_read_int_env("PAICLI_REACT_STAGNATION_WINDOW", DEFAULT_STAGNATION_WINDOW),
-            hard_max_iterations=_read_int_env("PAICLI_REACT_HARD_MAX_ITERATIONS", DEFAULT_HARD_MAX_ITERATIONS),
+            token_budget=_read_int_env("SHADOWCLI_REACT_TOKEN_BUDGET", sys.maxsize),
+            stagnation_window=_read_int_env("SHADOWCLI_REACT_STAGNATION_WINDOW", DEFAULT_STAGNATION_WINDOW),
+            hard_max_iterations=_read_int_env("SHADOWCLI_REACT_HARD_MAX_ITERATIONS", DEFAULT_HARD_MAX_ITERATIONS),
         )
 
     def begin_iteration(self) -> int:
