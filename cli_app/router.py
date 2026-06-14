@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from agent import ReactAgent
-from app_runtime import AppRuntime
+from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
 from llm import chat as default_chat
 from memory import MemoryProposal, ProposeMemoryTool
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
@@ -85,6 +85,7 @@ class ReplRouter:
         chat_fn: Callable[..., Any] = default_chat,
         build_branch_summary: Callable[[NavigationPlan], str] | None = None,
         confirm_memory: Callable[[MemoryProposal], bool] = ask_memory_confirmation,
+        run_interactive_in_worker: bool = False,
     ) -> None:
         self.app_runtime = app_runtime
         self.runtime = app_runtime.tool_runtime
@@ -99,6 +100,7 @@ class ReplRouter:
         self.chat_fn = chat_fn
         self.build_branch_summary = build_branch_summary
         self.confirm_memory = confirm_memory
+        self.run_interactive_in_worker = run_interactive_in_worker
         _register_propose_memory_tool(self.runtime, self.long_term, confirm_memory=self.confirm_memory)
 
         self.session: SessionManager | None = None
@@ -116,6 +118,12 @@ class ReplRouter:
             return True
         if line == "/tools":
             self.renderer.message(self.list_tools(self.runtime))
+            return True
+        if line == "/cancel":
+            if self.cancel_current(reason="slash_cancel"):
+                self.renderer.cancel_requested()
+            else:
+                self.renderer.message("当前没有正在运行的任务。")
             return True
         if parse_plugins_command(line):
             self._handle_plugins()
@@ -185,6 +193,16 @@ class ReplRouter:
         assert self.agent is not None
         assert self.runtime_context_builder is not None
         return self.session, self.agent, self.runtime_context_builder
+
+    def ensure_worker_session(self) -> tuple[SessionManager, RuntimeContextBuilder]:
+        if self.session is None:
+            self.session = self.session_store.create(self.cwd)
+            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
+            self.renderer.message(f"已开始新对话: {self.session.meta.session_id}")
+        assert self.session is not None
+        if self.runtime_context_builder is None:
+            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
+        return self.session, self.runtime_context_builder
 
     def ensure_existing_session(self) -> bool:
         if self.session is not None:
@@ -275,7 +293,11 @@ class ReplRouter:
             self.renderer.message("用法: /skill <name> [任务]")
             return
 
-        active_session, active_agent, context_builder = self.ensure_session()
+        if self.run_interactive_in_worker:
+            active_session, context_builder = self.ensure_worker_session()
+            active_agent = self.agent or _ConversationReloadSink()
+        else:
+            active_session, active_agent, context_builder = self.ensure_session()
         self.runtime_context_builder = self._prepare_agent_run(
             active_session,
             active_agent,
@@ -288,12 +310,21 @@ class ReplRouter:
             self.renderer.message(f"未找到 skill: {name}")
             return
         self.renderer.message(f"✓ 加载 skill: {name}")
-        self.run_agent_once(
-            active_agent,
-            agent_task,
-            runtime_context_builder=run_context_builder,
-            renderer=self.renderer,
-        )
+        if self.run_interactive_in_worker:
+            buffer = TurnBuffer()
+            worker_agent = self.build_agent(
+                self.runtime,
+                conversation_messages=active_session.messages(),
+                on_message_appended=buffer.append,
+            )
+            self._start_worker_turn(active_session, agent_task, run_context_builder, worker_agent, buffer)
+        else:
+            self.run_agent_once(
+                active_agent,
+                agent_task,
+                runtime_context_builder=run_context_builder,
+                renderer=self.renderer,
+            )
 
     def _run_agent_line(
         self,
@@ -302,7 +333,17 @@ class ReplRouter:
         allow_auto_skill: bool = True,
     ) -> None:
         selection = self._select_auto_skill(line) if allow_auto_skill else None
-        active_session, active_agent, context_builder = self.ensure_session()
+        if self.run_interactive_in_worker:
+            active_session, context_builder = self.ensure_worker_session()
+            buffer = TurnBuffer()
+            active_agent = self.build_agent(
+                self.runtime,
+                conversation_messages=active_session.messages(),
+                on_message_appended=buffer.append,
+            )
+        else:
+            active_session, active_agent, context_builder = self.ensure_session()
+            buffer = None
         self.runtime_context_builder = self._prepare_agent_run(
             active_session,
             active_agent,
@@ -316,12 +357,55 @@ class ReplRouter:
                 self.runtime_context_builder,
                 arguments=line,
             )
-        self.run_agent_once(
-            active_agent,
-            line,
-            runtime_context_builder=run_context_builder,
-            renderer=self.renderer,
-        )
+        if self.run_interactive_in_worker:
+            assert buffer is not None
+            self._start_worker_turn(active_session, line, run_context_builder, active_agent, buffer)
+        else:
+            self.run_agent_once(
+                active_agent,
+                line,
+                runtime_context_builder=run_context_builder,
+                renderer=self.renderer,
+            )
+
+    def cancel_current(self, reason: str = "user_cancelled") -> bool:
+        return self.app_runtime.task_runtime.cancel_current(reason=reason)
+
+    def wait_current(self, timeout: float | None = None) -> bool:
+        return self.app_runtime.task_runtime.wait_current(timeout=timeout)
+
+    def _start_worker_turn(
+        self,
+        active_session: SessionManager,
+        user_input: str,
+        run_context_builder: RuntimeContextBuilder | SkillContextBuilder,
+        worker_agent: ReactAgent,
+        buffer: TurnBuffer,
+    ) -> None:
+        journal = _journal_for_session(active_session)
+        self.app_runtime.task_runtime.journal = journal
+        context_builder = _RuntimeNoticeContextBuilder(run_context_builder, journal)
+        task_runtime = self.app_runtime.task_runtime
+
+        def run(task) -> None:
+            scoped_renderer = _TaskScopedRenderer(self.renderer, task_runtime, task)
+            self.run_agent_once(
+                worker_agent,
+                user_input,
+                runtime_context_builder=context_builder,
+                renderer=scoped_renderer,
+                cancel=task.cancel,
+                journal=journal,
+                turn_id=task.id,
+            )
+            if task.cancel.is_set() or not task_runtime.is_current(task.id):
+                task.cancel.set()
+                return
+            buffer.commit(active_session)
+            self.agent = worker_agent
+            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(active_session)
+
+        task_runtime.start_interactive(run)
 
     def _select_auto_skill(self, line: str) -> SkillSelection | None:
         return self.app_runtime.skill_manager.select_auto_skill(
@@ -528,6 +612,58 @@ def _format_auto_skill_selection(selection: SkillSelection) -> str:
         f"自动加载 skill: {skill_reference(selection.skill)}",
         f"原因: {reason}",
     ])
+
+
+class _RuntimeNoticeContextBuilder:
+    def __init__(self, base, journal: RuntimeJournal | None):
+        self.base = base
+        self.journal = journal
+
+    def build(self, query: str = "") -> str:
+        context = self.base.build(query)
+        notice = self.journal.format_last_cancelled_turn_notice() if self.journal is not None else ""
+        if not notice:
+            return context
+        sections = ["## 上一轮中断状态", notice]
+        if context:
+            sections.extend(["", context])
+        return "\n".join(sections).rstrip()
+
+
+class _TaskScopedRenderer:
+    def __init__(self, base: Renderer, task_runtime, task):
+        self.base = base
+        self.task_runtime = task_runtime
+        self.task = task
+
+    def message(self, message: str) -> None:
+        if self._active():
+            self.base.message(message)
+
+    def agent_event(self, event, *, agent_name: str = "react") -> None:
+        if self._active():
+            self.base.agent_event(event, agent_name=agent_name)
+
+    def cancel_requested(self) -> None:
+        self.base.cancel_requested()
+
+    def branch_navigation_choice(self, plan=None):
+        return self.base.branch_navigation_choice(plan)
+
+    def _active(self) -> bool:
+        return self.task_runtime.is_current(self.task.id) and not self.task.cancel.is_set()
+
+
+class _ConversationReloadSink:
+    def replace_conversation_messages(self, messages) -> None:
+        return None
+
+
+def _journal_for_session(session: SessionManager) -> RuntimeJournal | None:
+    path = Path(getattr(session, "path", ""))
+    if path == Path("."):
+        return None
+    return RuntimeJournal(path / "runtime_journal.jsonl")
 
 
 def _register_propose_memory_tool(runtime: Any, long_term: Any, *, confirm_memory: Callable[[MemoryProposal], bool]) -> None:

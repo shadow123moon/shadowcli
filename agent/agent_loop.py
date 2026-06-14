@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -55,6 +56,8 @@ class AgentLoop:
         tool_registry,
         *,
         cancel: threading.Event | None = None,
+        journal=None,
+        turn_id: str | None = None,
         conversation_history: list[Message] | None = None,
         on_message_appended: MessageSink | None = None,
         use_tools: bool = True,
@@ -63,6 +66,8 @@ class AgentLoop:
         self.chat = chat
         self.tool_registry = tool_registry
         self.cancel = cancel or threading.Event()
+        self.journal = journal
+        self.turn_id = turn_id
         self.conversation_history = conversation_history if conversation_history is not None else []
         self.on_message_appended = on_message_appended
         self.use_tools = use_tools
@@ -291,7 +296,15 @@ class AgentLoop:
         try:
             args = json.loads(tool_call.function.arguments)
             display_name = self._display_name()
-            result = self.tool_registry.execute(tool_call.function.name, args)
+            result = _execute_registry_tool(
+                self.tool_registry,
+                tool_call.function.name,
+                args,
+                cancel=self.cancel,
+                journal=self.journal,
+                turn_id=self.turn_id,
+                tool_call_id=tool_call.id,
+            )
             if _is_tool_error_result(result):
                 log.warning(
                     "[工具错误] %s 调用 %s：%s",
@@ -335,6 +348,22 @@ def _is_parallel_read_tool(name: str, registry) -> bool:
     except (AttributeError, KeyError):
         return False
     return getattr(tool, "effect", "write") == "read" and bool(getattr(tool, "concurrency_safe", False))
+
+
+def _execute_registry_tool(registry, name: str, args: dict, **context) -> str:
+    execute = registry.execute
+    try:
+        signature = inspect.signature(execute)
+    except (TypeError, ValueError):
+        return execute(name, args, **context)
+    accepts_context = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter_name in signature.parameters
+        for parameter_name, parameter in signature.parameters.items()
+        if parameter_name in context or parameter.kind == inspect.Parameter.VAR_KEYWORD
+    )
+    if accepts_context:
+        return execute(name, args, **context)
+    return execute(name, args)
 
 
 def _cancel_events():

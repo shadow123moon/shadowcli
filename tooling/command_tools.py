@@ -1,11 +1,17 @@
 import os
+import queue
+import signal
 import subprocess
+import time
 from typing import Dict
 
 from .base import Tool
+from .process_io import StreamCaptureState, start_stream_reader
 from .results import truncate_tool_text
 
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120
+DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES = 256 * 1024
+DEFAULT_OUTPUT_QUEUE_SIZE = 128
 
 
 class BashTool(Tool):
@@ -54,29 +60,103 @@ class BashTool(Tool):
         }
 
     def execute(self, arguments: Dict) -> str:
+        return self.execute_with_context(arguments, None)
+
+    def execute_with_context(self, arguments: Dict, context) -> str:
         command = arguments["command"]
         timeout = _command_timeout(arguments.get("timeout_seconds"))
+        cancel = getattr(context, "cancel", None) if context is not None else None
+        return _run_command(command, timeout=timeout, cancel=cancel)
+
+
+def _run_command(command: str, *, timeout: int, cancel=None) -> str:
+    output_limit = _command_output_limit()
+    output_queue: queue.Queue = queue.Queue(maxsize=DEFAULT_OUTPUT_QUEUE_SIZE)
+    stdout_state = StreamCaptureState("stdout")
+    stderr_state = StreamCaptureState("stderr")
+    chunks: dict[str, list[bytes]] = {"stdout": [], "stderr": []}
+
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": False,
+    }
+    if os.name == "nt":
+        args = ["powershell", "-NoProfile", "-Command", command]
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        args = command
+        popen_kwargs["shell"] = True
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        process = subprocess.Popen(args, **popen_kwargs)
+    except OSError as exc:
+        return f"命令执行失败（启动失败）\n错误类型: command_start_failed\nstderr:\n{exc}"
+
+    stdout_thread = start_stream_reader(
+        process.stdout,
+        "stdout",
+        output_queue,
+        stdout_state,
+        limit_bytes=output_limit,
+    )
+    stderr_thread = start_stream_reader(
+        process.stderr,
+        "stderr",
+        output_queue,
+        stderr_state,
+        limit_bytes=output_limit,
+    )
+    deadline = time.monotonic() + timeout
+
+    while True:
+        _drain_output(output_queue, chunks)
+
+        if cancel is not None and cancel.is_set():
+            _kill_process_tree(process)
+            _finish_process(process)
+            _join_readers(stdout_thread, stderr_thread)
+            _close_process_streams(process)
+            _drain_output(output_queue, chunks)
+            return _format_cancelled_result(command, chunks, stdout_state, stderr_state)
+
         try:
-            if os.name == "nt":
-                result = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", command],
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=timeout,
-                )
-            else:
-                result = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=timeout,
-                )
-        except subprocess.TimeoutExpired as exc:
+            returncode = process.poll()
+        except OSError as exc:
+            _kill_process_tree(process)
+            return f"命令执行失败（状态检查失败）\n错误类型: command_poll_failed\nstderr:\n{exc}"
+
+        if returncode is not None:
+            _join_readers(stdout_thread, stderr_thread)
+            _close_process_streams(process)
+            _drain_output(output_queue, chunks)
+            result = subprocess.CompletedProcess(
+                args=args,
+                returncode=returncode,
+                stdout=_decode_stream(chunks["stdout"], stdout_state),
+                stderr=_decode_stream(chunks["stderr"], stderr_state),
+            )
+            return _format_result(result)
+
+        if time.monotonic() >= deadline:
+            _kill_process_tree(process)
+            _finish_process(process)
+            _join_readers(stdout_thread, stderr_thread)
+            _close_process_streams(process)
+            _drain_output(output_queue, chunks)
+            exc = subprocess.TimeoutExpired(
+                cmd=command,
+                timeout=timeout,
+                output=_decode_stream(chunks["stdout"], stdout_state),
+                stderr=_decode_stream(chunks["stderr"], stderr_state),
+            )
             return _format_result(exc, command, timeout)
-        return _format_result(result)
+
+        if cancel is not None:
+            cancel.wait(0.05)
+        else:
+            time.sleep(0.05)
 
 
 def _command_timeout(raw_timeout) -> int:
@@ -86,6 +166,119 @@ def _command_timeout(raw_timeout) -> int:
     except (TypeError, ValueError):
         return DEFAULT_COMMAND_TIMEOUT_SECONDS
     return max(1, timeout)
+
+
+def _command_output_limit() -> int:
+    try:
+        limit = int(os.getenv("SHADOWCLI_COMMAND_OUTPUT_LIMIT_BYTES") or DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES)
+    except (TypeError, ValueError):
+        return DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES
+    return max(1024, limit)
+
+
+def _drain_output(output_queue: queue.Queue, chunks: dict[str, list[bytes]]) -> None:
+    while True:
+        try:
+            stream_name, payload = output_queue.get_nowait()
+        except queue.Empty:
+            return
+        chunks.setdefault(stream_name, []).append(payload)
+
+
+def _join_readers(*threads) -> None:
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+
+def _close_process_streams(process: subprocess.Popen) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _finish_process(process: subprocess.Popen) -> None:
+    try:
+        process.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                pass
+
+
+def _decode_stream(chunks: list[bytes], state: StreamCaptureState) -> str:
+    text = b"".join(chunks).decode(errors="replace")
+    notices: list[str] = []
+    if state.truncated_by_limit:
+        notices.append(f"[{state.stream_name} output truncated: exceeded {state.kept_bytes} bytes]")
+    if state.truncated_by_queue:
+        notices.append(f"[{state.stream_name} output dropped: internal output queue was full]")
+    if state.read_error:
+        notices.append(f"[{state.stream_name} read error: {state.read_error}]")
+    if notices:
+        suffix = "\n".join(notices)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += suffix + "\n"
+    return text
+
+
+def _format_cancelled_result(
+    command: str,
+    chunks: dict[str, list[bytes]],
+    stdout_state: StreamCaptureState,
+    stderr_state: StreamCaptureState,
+) -> str:
+    parts = [
+        "命令已取消，已尝试终止进程树。",
+        "错误类型: cancelled",
+        f"command: {command}",
+    ]
+    stdout = _decode_stream(chunks["stdout"], stdout_state)
+    stderr = _decode_stream(chunks["stderr"], stderr_state)
+    if stdout:
+        parts.append(f"stdout:\n{truncate_tool_text(stdout)}")
+    if stderr:
+        parts.append(f"stderr:\n{truncate_tool_text(stderr)}")
+    return "\n\n".join(parts)
 
 
 def _format_result(result, command: str = "", timeout: int = 0) -> str:

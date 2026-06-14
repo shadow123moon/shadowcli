@@ -53,6 +53,12 @@ class SessionRepository:
                 header = data
             elif entry_type == "leaf":
                 leaf_id = data.get("leaf_id")
+            elif entry_type == "turn":
+                for item in data.get("entries") or []:
+                    entry = entry_from_dict(item)
+                    if entry is not None:
+                        entries.append(entry)
+                leaf_id = data.get("leaf_id", leaf_id)
             else:
                 entry = entry_from_dict(data)
                 if entry is not None:
@@ -64,6 +70,13 @@ class SessionRepository:
 
     def append_entry(self, entry: SessionEntry) -> None:
         self._append_raw(entry_to_dict(entry))
+
+    def append_turn(self, entries: list[SessionEntry], leaf_id: str | None) -> None:
+        self._append_raw({
+            "type": "turn",
+            "entries": [entry_to_dict(entry) for entry in entries],
+            "leaf_id": leaf_id,
+        })
 
     def append_leaf(self, leaf_id: str | None) -> None:
         self._append_raw({"type": "leaf", "leaf_id": leaf_id})

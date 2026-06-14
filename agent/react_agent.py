@@ -26,18 +26,23 @@ class ReactAgent:
             on_message_appended=on_message_appended,
         )
 
-    def events(self, user_input: str, context: str = ""):
+    def events(self, user_input: str, context: str = "", *, cancel=None, journal=None, turn_id: str | None = None):
         # 重置取消标志（每次新请求都要清除）
-        self.reactr.cancel.clear()
+        if cancel is not None:
+            self.reactr.cancel = cancel
+        else:
+            self.reactr.cancel.clear()
+        self.reactr.journal = journal
+        self.reactr.turn_id = turn_id
 
         task = Message(role="user", content=user_input)
         yield from self.reactr.execute(task, context=context, allow_tools=True)
 
-    def run(self, user_input: str, context: str = "") -> str:
+    def run(self, user_input: str, context: str = "", *, cancel=None, journal=None, turn_id: str | None = None) -> str:
         """Run the agent and return final streamed text without rendering UI."""
         content_parts = []
         try:
-            for event in self.events(user_input, context=context):
+            for event in self.events(user_input, context=context, cancel=cancel, journal=journal, turn_id=turn_id):
                 if event.type == "content":
                     content_parts.append(event.data)
                 elif event.type == "done":

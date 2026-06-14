@@ -4,6 +4,7 @@ from .runtime import AppRuntime
 from .session import PreparedAgentRun, SessionRuntime
 from .skills import SkillManager, build_plugin_skill_registry
 from .state import AppStateStore
+from .tasks import RuntimeJournal, RuntimeTask, StreamCaptureState, TaskRuntime, TurnBuffer
 
 __all__ = [
     "AppRuntime",
@@ -12,7 +13,12 @@ __all__ = [
     "HookManager",
     "PreparedAgentRun",
     "RuntimeEvent",
+    "RuntimeJournal",
+    "RuntimeTask",
     "SessionRuntime",
     "SkillManager",
+    "StreamCaptureState",
+    "TaskRuntime",
+    "TurnBuffer",
     "build_plugin_skill_registry",
 ]

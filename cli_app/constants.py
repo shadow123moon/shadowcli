@@ -21,6 +21,7 @@ HELP = (
     "/tree       选择会话节点\n"
     "/jump       跳转到消息节点\n"
     "/compact    压缩当前分支\n"
+    "/cancel     取消当前正在运行的任务\n"
     "/quit       退出"
 )
 

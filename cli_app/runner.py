@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
+import threading
 
 from dotenv import load_dotenv
 
@@ -28,6 +30,9 @@ def run_once(
     *,
     runtime_context_builder: RuntimeContextBuilder | None = None,
     renderer: Renderer | None = None,
+    cancel: threading.Event | None = None,
+    journal=None,
+    turn_id: str | None = None,
 ) -> str:
     renderer = renderer or TerminalRenderer()
     try:
@@ -37,10 +42,26 @@ def run_once(
                 renderer.message("用法: /plan <任务>")
                 return ""
             context = runtime_context_builder.build(plan_input) if runtime_context_builder is not None else ""
-            return _run_agent_events(agent, _single_agent_plan_prompt(plan_input), context=context, renderer=renderer)
+            return _run_agent_events(
+                agent,
+                _single_agent_plan_prompt(plan_input),
+                context=context,
+                renderer=renderer,
+                cancel=cancel,
+                journal=journal,
+                turn_id=turn_id,
+            )
         else:
             context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
-            return _run_agent_events(agent, user_input, context=context, renderer=renderer)
+            return _run_agent_events(
+                agent,
+                user_input,
+                context=context,
+                renderer=renderer,
+                cancel=cancel,
+                journal=journal,
+                turn_id=turn_id,
+            )
             # React 模式：已经流式打印，不再重复输出
     except Exception as e:
         log.exception("[入口] 执行失败")
@@ -63,10 +84,20 @@ def _run_agent_events(
     *,
     context: str = "",
     renderer: Renderer,
+    cancel: threading.Event | None = None,
+    journal=None,
+    turn_id: str | None = None,
 ) -> str:
     content_parts: list[str] = []
     try:
-        for event in agent.events(user_input, context=context):
+        for event in _agent_events(
+            agent,
+            user_input,
+            context=context,
+            cancel=cancel,
+            journal=journal,
+            turn_id=turn_id,
+        ):
             if event.type == "content":
                 content_parts.append(event.data)
             renderer.agent_event(event, agent_name="react")
@@ -77,6 +108,32 @@ def _run_agent_events(
         agent.cancel()
         return "".join(content_parts) + "\n[已中止]"
     return "".join(content_parts)
+
+
+def _agent_events(
+    agent: ReactAgent,
+    user_input: str,
+    *,
+    context: str,
+    cancel: threading.Event | None,
+    journal,
+    turn_id: str | None,
+):
+    events = agent.events
+    try:
+        signature = inspect.signature(events)
+    except (TypeError, ValueError):
+        yield from events(user_input, context=context, cancel=cancel, journal=journal, turn_id=turn_id)
+        return
+    accepts_context_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        or parameter_name in {"cancel", "journal", "turn_id"}
+        for parameter_name, parameter in signature.parameters.items()
+    )
+    if accepts_context_kwargs:
+        yield from events(user_input, context=context, cancel=cancel, journal=journal, turn_id=turn_id)
+    else:
+        yield from events(user_input, context=context)
 
 
 def repl(renderer: Renderer | None = None) -> int:
@@ -104,6 +161,7 @@ def repl(renderer: Renderer | None = None) -> int:
             list_tools=list_tools,
             chat_fn=chat,
             build_branch_summary=generate_branch_summary,
+            run_interactive_in_worker=True,
         )
 
         renderer.message(BANNER)
@@ -112,10 +170,17 @@ def repl(renderer: Renderer | None = None) -> int:
         while True:
             try:
                 line = prompt().strip()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
+                router.wait_current(timeout=30)
+                break
+            except KeyboardInterrupt:
+                if router.cancel_current(reason="ctrl_c"):
+                    renderer.cancel_requested()
+                    continue
                 break
 
             if not router.route(line):
+                router.wait_current(timeout=30)
                 break
     finally:
         log.debug("Shutting down MCP servers...")

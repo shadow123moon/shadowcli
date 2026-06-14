@@ -62,6 +62,36 @@ class SessionManager:
         self._persist_meta(entry.timestamp)
         return entry
 
+    def append_messages(self, messages: list[Message]) -> list[MessageEntry]:
+        if not messages:
+            return []
+
+        entries: list[MessageEntry] = []
+        parent_id = self.leaf_id
+        timestamp = _now_iso()
+        for message in messages:
+            entry = MessageEntry(
+                id=_new_entry_id(),
+                parent_id=parent_id,
+                timestamp=timestamp,
+                message=message,
+            )
+            entries.append(entry)
+            parent_id = entry.id
+
+        self._entries.extend(entries)
+        self.leaf_id = entries[-1].id
+        self.repository.append_turn(entries, self.leaf_id)
+        self.meta.message_count += len(entries)
+        for entry in entries:
+            if (not self.meta.title or self.meta.title == DEFAULT_SESSION_TITLE) and entry.message.role == "user":
+                title = title_from_text(entry.message.content)
+                if title:
+                    self.meta.title = title
+                    break
+        self._persist_meta(timestamp)
+        return entries
+
     def append_tool_result(self, tool_call_id: str, content: str) -> MessageEntry:
         return self.append_message(Message(role="tool", content=content, tool_call_id=tool_call_id))
 

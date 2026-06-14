@@ -13,6 +13,7 @@ from .hooks import HookManager
 from .session import PreparedAgentRun, SessionRuntime
 from .skills import SkillManager
 from .state import AppStateStore
+from .tasks import TaskRuntime
 
 
 LongTermBuilder = Callable[[Path], Any]
@@ -35,6 +36,7 @@ class AppRuntime:
     hook_manager: HookManager
     session_runtime: SessionRuntime
     skill_manager: SkillManager
+    task_runtime: TaskRuntime
 
     @classmethod
     def create(
@@ -62,6 +64,7 @@ class AppRuntime:
         hook_manager.attach_tool_runtime(tool_runtime)
         skill_manager = SkillManager.create(project_cwd, state_store=state_store, event_bus=bus)
         session_runtime = SessionRuntime(long_term_memory=memory)
+        task_runtime = TaskRuntime()
         runtime = cls(
             cwd=project_cwd,
             tool_runtime=tool_runtime,
@@ -72,6 +75,7 @@ class AppRuntime:
             hook_manager=hook_manager,
             session_runtime=session_runtime,
             skill_manager=skill_manager,
+            task_runtime=task_runtime,
         )
         runtime.event_bus.publish("runtime.created", cwd=project_cwd)
         return runtime
