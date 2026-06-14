@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict
 
 from .base import Tool
+from .file_cache import get_read_state_cache, scope_id_from_context
 from .file_tracker import get_file_tracker
 
 # 搜索时默认跳过的目录（噪音大 / 体积大）
@@ -73,13 +74,19 @@ class ReadTool(Tool):
         }
 
     def execute(self, arguments: Dict) -> str:
+        return self._execute(arguments, cache_scope=scope_id_from_context(None))
+
+    def execute_with_context(self, arguments: Dict, context) -> str:
+        return self._execute(arguments, cache_scope=scope_id_from_context(context))
+
+    def _execute(self, arguments: Dict, *, cache_scope: str) -> str:
         if "paths" in arguments:
-            return self._read_many(arguments)
+            return self._read_many(arguments, cache_scope=cache_scope)
         if "path" not in arguments:
             return "读取失败: 必须提供 path 或 paths"
-        return self._read_one(arguments)
+        return self._read_one({**arguments, "cache_scope": cache_scope})
 
-    def _read_many(self, arguments: Dict) -> str:
+    def _read_many(self, arguments: Dict, *, cache_scope: str) -> str:
         paths = arguments.get("paths")
         if isinstance(paths, str):
             paths = [paths]
@@ -91,7 +98,7 @@ class ReadTool(Tool):
         offset = arguments.get("offset")
         limit = arguments.get("limit")
         read_args = [
-            {"path": str(path), "offset": offset, "limit": limit}
+            {"path": str(path), "offset": offset, "limit": limit, "cache_scope": cache_scope}
             for path in paths
         ]
 
@@ -105,20 +112,22 @@ class ReadTool(Tool):
         return "\n\n".join(sections)
 
     def _read_one(self, arguments: Dict) -> str:
-        from .file_cache import _file_cache
-
         path = Path(arguments["path"])
+        scope_id = arguments.get("cache_scope") or scope_id_from_context(None)
 
         if not path.exists():
             return f"文件不存在: {path}"
         if path.is_dir():
             return f"这是目录不是文件: {path}"
 
-        # 检查缓存
-        should_read, hint_or_old = _file_cache.should_read(path)
-        if not should_read:
-            # 文件未修改，直接返回提示
-            return hint_or_old
+        offset = max(1, int(arguments.get("offset") or 1))
+        limit = max(1, int(arguments.get("limit") or 2000))
+
+        cache = get_read_state_cache()
+        decision = cache.lookup(path, scope_id=scope_id, offset=offset, limit=limit)
+        if not decision.should_read:
+            get_file_tracker().record_read(path)
+            return decision.message or f"[CACHED] {path.name} already shown (unchanged)"
 
         size = path.stat().st_size
         if size > 250 * 1024:
@@ -131,9 +140,6 @@ class ReadTool(Tool):
         except OSError as exc:
             return f"读取失败: {exc}"
 
-        offset = max(1, int(arguments.get("offset") or 1))
-        limit = max(1, int(arguments.get("limit") or 2000))
-
         try:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
@@ -143,13 +149,16 @@ class ReadTool(Tool):
         get_file_tracker().record_read(path)
 
         total = len(lines)
+        full_content = "\n".join(lines)
         if total == 0:
-            _file_cache.store(path, "")
+            cache.store(path, content=full_content, total_lines=total, shown_range=None, scope_id=scope_id)
             return "（空文件，0 行）"
         if offset > total:
+            cache.store(path, content=full_content, total_lines=total, shown_range=None, scope_id=scope_id)
             return f"行号 {offset} 超出范围（文件共 {total} 行）"
 
         selected = lines[offset - 1: offset - 1 + limit]
+        shown_range = (offset, offset + len(selected) - 1)
 
         numbered = []
         for i, line in enumerate(selected, start=offset):
@@ -158,20 +167,19 @@ class ReadTool(Tool):
             numbered.append(f"{i:6d}| {line}")
 
         content = "\n".join(numbered)
-        full_content = "\n".join(lines)
 
         # 增量对比（如果有旧内容）
-        if hint_or_old:
-            diff = self._compute_diff(hint_or_old, full_content)
+        if decision.old_content:
+            diff = self._compute_diff(decision.old_content, full_content)
             changed_lines = diff.count('\n')
             # 变化小于30%且少于100行，显示diff
             if changed_lines > 5 and changed_lines < min(100, total * 0.3):
-                _file_cache.store(path, full_content)
+                cache.store(path, content=full_content, total_lines=total, shown_range=shown_range, scope_id=scope_id)
                 header = f"[UPDATED] {path.name} (total {total} lines, {changed_lines} changes)"
                 return f"{header}\n\n{diff}"
 
         # 首次读取或大改动，显示完整内容
-        _file_cache.store(path, full_content)
+        cache.store(path, content=full_content, total_lines=total, shown_range=shown_range, scope_id=scope_id)
 
         header = f"共 {total} 行，显示 {offset}-{offset + len(selected) - 1}"
         if offset + len(selected) <= total:

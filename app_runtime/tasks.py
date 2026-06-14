@@ -75,7 +75,9 @@ class RuntimeJournal:
 
         lines = [
             "上一轮被用户中断，会话消息未提交。",
-            "但以下有副作用工具已经开始执行，物理状态可能已经改变；下一步必须先检查现实状态，不要假设命令没有执行：",
+            "以下有副作用工具已经开始执行，物理状态可能已经改变；不要假设命令没有执行：",
+            "如果当前用户只是询问上一轮发生了什么，先直接说明中断事实，不要主动调用工具。",
+            "只有在继续上一轮任务、依赖工具结果或用户要求核实时，才先检查现实状态：",
         ]
         for event in effectful_tools:
             name = event.get("name", "tool")
@@ -93,6 +95,7 @@ class RuntimeTask:
     status: str = "pending"
     error: str = ""
     cancel_reason: str = ""
+    cancel_journal_recorded: bool = False
     thread: threading.Thread | None = None
 
 
@@ -126,7 +129,7 @@ class TaskRuntime:
                 task.status = "error"
                 task.error = str(exc)
             finally:
-                if task.status == "cancelled" and journal is not None:
+                if task.status == "cancelled" and journal is not None and not task.cancel_journal_recorded:
                     journal.append(
                         "turn_cancelled",
                         turn_id=task.id,
@@ -148,6 +151,13 @@ class TaskRuntime:
                 return False
             task.cancel_reason = reason
             task.cancel.set()
+            if self.journal is not None and not task.cancel_journal_recorded:
+                self.journal.append(
+                    "turn_cancelled",
+                    turn_id=task.id,
+                    reason=task.cancel_reason or "cancelled",
+                )
+                task.cancel_journal_recorded = True
             return True
 
     def wait_current(self, timeout: float | None = None) -> bool:

@@ -71,6 +71,8 @@ class RuntimeJournalTests(unittest.TestCase):
         self.assertIn("上一轮被用户中断", notice)
         self.assertIn("mkdir new_folder", notice)
         self.assertIn("物理状态可能已经改变", notice)
+        self.assertNotIn("下一步必须先检查现实状态", notice)
+        self.assertIn("如果当前用户只是询问上一轮发生了什么，先直接说明中断事实，不要主动调用工具", notice)
 
 
 class ContextRecordingTool(Tool):
@@ -317,6 +319,57 @@ class RouterWorkerTests(unittest.TestCase):
 
         self.assertEqual(messages, [])
         self.assertIn("turn_cancelled", [event["type"] for event in events])
+
+    def test_cancel_request_is_visible_to_next_turn_before_cancelled_worker_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            runtime = AppRuntime.create(
+                cwd,
+                tool_runtime=ToolRuntime(ToolRegistry()),
+                session_store=SessionStore(Path(tmp) / "sessions"),
+                long_term_memory=[],
+            )
+            renderer = CaptureRenderer()
+            first_started = threading.Event()
+            release_first = threading.Event()
+            second_context_ready = threading.Event()
+            contexts: dict[str, str] = {}
+
+            def build_agent(_runtime, *, conversation_messages=None, on_message_appended=None):
+                return BufferedAgent(on_message_appended=on_message_appended)
+
+            def run_agent_once(agent, user_input, *, runtime_context_builder=None, **_kwargs):
+                contexts[user_input] = runtime_context_builder.build(user_input)
+                if user_input == "slow":
+                    first_started.set()
+                    release_first.wait(timeout=3)
+                    return ""
+                second_context_ready.set()
+                return "ok"
+
+            repl_router = ReplRouter(
+                app_runtime=runtime,
+                renderer=renderer,
+                build_agent=build_agent,
+                run_agent_once=run_agent_once,
+                run_interactive_in_worker=True,
+            )
+
+            self.assertTrue(repl_router.route("slow"))
+            self.assertTrue(first_started.wait(timeout=3))
+            first_task = runtime.task_runtime.current_interactive
+            self.assertTrue(repl_router.cancel_current(reason="test_cancel"))
+
+            self.assertTrue(repl_router.route("上一轮发生了什么？"))
+            second_task = runtime.task_runtime.current_interactive
+            self.assertTrue(second_context_ready.wait(timeout=3))
+
+            release_first.set()
+            first_task.thread.join(timeout=3)
+            second_task.thread.join(timeout=3)
+
+        self.assertIn("上一轮被用户中断", contexts["上一轮发生了什么？"])
 
 
 if __name__ == "__main__":

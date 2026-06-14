@@ -10,7 +10,8 @@ from typing import Any
 
 from llm import ChatResponse, Message, chat
 
-from .registry import SkillDefinition, SkillRegistry
+from .registry import SkillRegistry
+from .types import SkillDefinition
 
 
 AUTO_SKILLS_ENV = "SHADOWCLI_AUTO_SKILLS"

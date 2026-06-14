@@ -1,5 +1,5 @@
 from .context import SkillContextBuilder, format_skill_context
-from .registry import LoadedSkill, SkillDefinition, SkillDiagnostic, SkillRegistry, SkillRoot
+from .registry import SkillRegistry
 from .selector import (
     AUTO_SKILLS_ENV,
     SkillSelection,
@@ -8,6 +8,7 @@ from .selector import (
     auto_skills_enabled,
     skill_reference,
 )
+from .types import LoadedSkill, SkillDefinition, SkillDiagnostic, SkillRoot
 
 __all__ = [
     "AUTO_SKILLS_ENV",

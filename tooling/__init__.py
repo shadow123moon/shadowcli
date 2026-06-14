@@ -10,6 +10,7 @@ from .file_tools import (
 
 )
 from .file_tracker import FileTracker, get_file_tracker, register_freshness_guard
+from .file_cache import ReadStateCache, get_read_state_cache
 from .registry import ToolRegistry
 from .runtime import BeforeExecuteHook, ToolExecutionBlocked, ToolRuntime
 from .web_tools import WebSearchTool ,WebFetchTool
@@ -30,6 +31,8 @@ __all__ = [
     "WebSearchTool",
     "WebFetchTool",
     "FileTracker",
+    "ReadStateCache",
     "get_file_tracker",
+    "get_read_state_cache",
     "register_freshness_guard",
 ]

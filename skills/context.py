@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .registry import LoadedSkill
+from .types import LoadedSkill
 
 
 class ContextBuilder(Protocol):
