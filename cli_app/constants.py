@@ -1,4 +1,4 @@
-from pathlib import Path
+from memory import DEFAULT_LONG_TERM_PATH
 
 BANNER = (
     "ShadowCLI\n"
@@ -37,4 +37,3 @@ RESUME_COMMAND = "/resume"
 TREE_COMMAND = "/tree"
 JUMP_COMMAND = "/jump"
 COMPACT_COMMAND = "/compact"
-DEFAULT_LONG_TERM_PATH = Path("agent_memory") / "memory"

@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 DEFAULT_LONG_TERM_NAME = "memory"
+DEFAULT_LONG_TERM_PATH = Path("agent_memory") / DEFAULT_LONG_TERM_NAME
 ENTRYPOINT_NAME = "MEMORY.md"
 DEFAULT_MEMORY_TYPE = "project"
 MEMORY_TYPES = ("user", "project", "feedback", "reference")
@@ -72,6 +73,10 @@ class TextLongTermMemory:
             memory_type,
             self._facts_by_type[memory_type],
         )
+
+
+def build_long_term_memory(long_term_path: Path | None = None) -> TextLongTermMemory:
+    return TextLongTermMemory(long_term_path or DEFAULT_LONG_TERM_PATH)
 
 
 def ensure_memory_storage(memory_dir: Path) -> None:

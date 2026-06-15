@@ -34,12 +34,6 @@ from .constants import (
     JUMP_COMMAND,
     COMPACT_COMMAND,
 )
-from .factories import (
-    build_agent,
-    build_long_term_memory,
-    build_registry,
-    list_tools,
-)
 from .logging_config import configure_logging
 from .runner import repl, run_once
 
@@ -60,10 +54,6 @@ __all__ = [
     "COMPACT_COMMAND",
     "DEFAULT_LONG_TERM_PATH",
     "configure_logging",
-    "build_registry",
-    "list_tools",
-    "build_long_term_memory",
-    "build_agent",
     "parse_plan_command",
     "parse_plugin_command",
     "parse_plugins_command",

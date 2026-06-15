@@ -16,10 +16,10 @@ Python Agent CLI — 基于 ReAct 的交互式代码助手，支持 skill 扩展
 
 ```
 cli_app/        — 命令解析、REPL 路由、终端交互
-app_runtime/    — 运行期资源组装（AppRuntime、HookManager、SkillManager、SessionRuntime）
+app_runtime/    — 运行期入口与资源生命周期（AppRuntime、HookManager、SkillManager、SessionRuntime）
 agent/          — ReAct 循环实现
 tooling/        — 工具定义与工具运行时（read、write、bash、grep、ToolRuntime 等）
-memory/         — 长期记忆存储、建议服务、propose_memory 工具
+memory/         — 长期记忆存储、build_long_term_memory、propose_memory 工具
 skills/         — Skill 注册表和选择器
 plugin_runtime/ — 插件发现、manifest 解析、状态管理
 sessions/       — 会话树、分支跳转、压缩
@@ -31,14 +31,22 @@ ui/             — 渲染抽象（终端、Markdown）
 
 `app_runtime/` 负责创建、持有和刷新运行期资源：
 
-- **AppRuntime** — 总装入口，持有所有运行期组件
+- **AppRuntime** — 总装入口，持有所有运行期组件，并提供运行时能力入口：
+  - `build_agent()` — 用当前 `ToolRuntime` 构建 ReAct agent
+  - `run_agent_once()` — 执行单轮 agent 输入，包含 `/plan` 单 agent 语义
+  - `list_tools()` — 格式化当前已注册工具
+  - `chat()` — 统一 LLM 调用入口，便于测试替换和后续 hook
+  - `build_branch_summary()` — 生成会话分支摘要
+  - `load_mcp_tools()` / `shutdown()` — 管理 MCP server 生命周期
 - **HookManager** — 工具 hooks 的安装与桥接（freshness guard）
 - **AppStateStore** — 项目级运行期状态（插件启用状态）
 - **SessionRuntime** — 会话上下文准备、自动压缩、agent 对话重载
 - **SkillManager** — 组合 PluginManager + SkillRegistry，承接插件启用/禁用、自动 skill 选择、skill context 组装
 - **EventBus** — 运行期生命周期事件发布（为阶段 7 插件贡献 hooks 预留）
 
-调用方通过 `app_runtime.skill_manager.X` / `app_runtime.session_runtime.X` 访问能力，不再通过门面转发。
+默认工具集由 `tooling.defaults.build_default_tool_runtime()` 构建；长期记忆由 `memory.build_long_term_memory()` 构建。`cli_app` 不再持有 factories 兼容层，也不直接组装默认工具、agent factory 或 MCP wrapper。
+
+调用方通过 `AppRuntime` 方法或 `app_runtime.skill_manager.X` / `app_runtime.session_runtime.X` 访问能力，不再通过 runner/router 门面转发。
 
 ## 近期演进
 
@@ -49,7 +57,7 @@ ui/             — 渲染抽象（终端、Markdown）
 阶段 4: 市面 skill/plugin 格式适配，已完成
 阶段 5: 插件启用/禁用/状态管理，已完成
 阶段 6: 隐式 skill 选择（SHADOWCLI_AUTO_SKILLS=1），已完成最小版
-运行期收拢: AppRuntime + EventBus + HookManager + AppStateStore + SessionRuntime + SkillManager，已完成
+运行期收拢: AppRuntime + EventBus + HookManager + AppStateStore + SessionRuntime + SkillManager + MCP 生命周期，已完成
 阶段 7: 插件贡献 hooks / MCP server / runtime extensions（待实现）
 ```
 

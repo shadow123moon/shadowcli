@@ -18,7 +18,7 @@ from agent.react_agent import ReactAgent
 from app_runtime import AppRuntime
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
-from memory import MemoryProposal, TextLongTermMemory
+from memory import MemoryProposal, TextLongTermMemory, build_long_term_memory
 from sessions import (
     BranchSummaryEntry,
     CompactionEntry,
@@ -48,6 +48,7 @@ from tooling import (
     WriteTool,
 )
 from tooling.runtime import ToolExecutionBlocked, ToolRuntime
+from tooling.defaults import build_default_tool_runtime
 from ui import BranchNavigationChoice, ask_branch_navigation_choice
 
 
@@ -535,11 +536,14 @@ class PluginManagerTests(unittest.TestCase):
                 session_store=_FailingSessionStore(),
                 long_term_memory=_StubLongTermMemory(),
             )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
+            )
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
-                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
             )
 
             keep_running = repl_router.route("/skills")
@@ -782,6 +786,48 @@ class AppRuntimeTests(unittest.TestCase):
         self.assertIs(app.skill_manager.state_store, app.state_store)
         self.assertIsInstance(app.skill_manager.plugin_manager, PluginManager)
         self.assertIsInstance(app.skill_manager.registry, SkillRegistry)
+
+    def test_app_runtime_loads_mcp_tools_into_tool_runtime(self):
+        class FakeMcpManager:
+            def __init__(self):
+                self.started = []
+                self.shutdown_called = False
+
+            def start_server_sync(self, name, config):
+                self.started.append((name, config))
+                return [{
+                    "name": "search",
+                    "description": "Search through fake MCP.",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }]
+
+            def call_tool_sync(self, *_args, **_kwargs):
+                return "ok"
+
+            def shutdown(self):
+                self.shutdown_called = True
+
+        config = type("Config", (), {"disabled": False})()
+        manager = FakeMcpManager()
+        runtime = ToolRuntime(ToolRegistry())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = AppRuntime.create(
+                Path(tmp),
+                tool_runtime=runtime,
+                long_term_memory=_StubLongTermMemory(),
+                mcp_manager=manager,
+            )
+            loaded, failed = app.load_mcp_tools({"filesystem": config})
+            app.shutdown()
+
+        self.assertEqual((loaded, failed), (1, 0))
+        self.assertEqual(manager.started, [("filesystem", config)])
+        self.assertTrue(manager.shutdown_called)
+        self.assertIn(
+            "mcp__filesystem__search",
+            [definition["function"]["name"] for definition in runtime.get_all_definitions()],
+        )
 
     def test_event_bus_publishes_subscribed_handlers_in_order(self):
         from app_runtime import EventBus
@@ -1506,15 +1552,22 @@ class CliAgentTests(unittest.TestCase):
             seen.append((registry, conversation_messages, callable(on_message_appended)))
             return _StubReactAgent()
 
+        def remember_runtime_agent(*, conversation_messages=None, on_message_appended=None):
+            return remember_registry(
+                runtime,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+
         import cli_app.runner as runner
         with (
             patch("cli_app.runner.load_dotenv"),
             patch("app_runtime.runtime._configure_logging_once"),
-            patch("cli_app.runner.build_registry", return_value=runtime),
+            patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
             patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
             patch("cli_app.runner.SessionStore", return_value=_StubSessionStore()),
             patch("cli_app.runner.load_mcp_config", return_value={}),
-            patch("cli_app.runner.build_agent", side_effect=remember_registry),
+            patch("app_runtime.runtime.AppRuntime.build_agent", side_effect=remember_runtime_agent),
             patch("builtins.input", side_effect=["你好", EOFError]),
         ):
             runner.repl(renderer=renderer)
@@ -1550,11 +1603,14 @@ class CliAgentTests(unittest.TestCase):
                 session_store=session_store,
                 long_term_memory=_StubLongTermMemory(),
             )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
+            )
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: self.fail("/skills 不应创建 agent"),
-                run_agent_once=lambda *args, **kwargs: self.fail("/skills 不应运行 agent"),
             )
 
             keep_running = repl_router.route("/skills")
@@ -1594,11 +1650,14 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_FailingSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: self.fail("/plugin 不应创建 agent"),
+                run_agent_once=lambda *args, **kwargs: self.fail("/plugin 不应运行 agent"),
+            )
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: self.fail("/plugin 不应创建 agent"),
-                run_agent_once=lambda *args, **kwargs: self.fail("/plugin 不应运行 agent"),
             )
 
             keep_running = repl_router.route("/plugins")
@@ -1643,11 +1702,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
             )
 
             keep_running = repl_router.route("/skill code-review 检查当前改动")
@@ -1689,11 +1747,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
             )
 
             keep_running = repl_router.route("/skill code-review")
@@ -1718,11 +1775,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
             )
 
             keep_running = repl_router.route("/skill missing 做点事")
@@ -1843,12 +1899,11 @@ class CliAgentTests(unittest.TestCase):
             skill = app.skill_manager.registry.find("code-review")
             self.assertIsNotNone(skill)
             selector = _FixedSkillSelector(SkillSelection(skill, "任务是在执行代码审查"))
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
 
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
                 skill_selector=selector,
             )
 
@@ -1880,11 +1935,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
                 skill_selector=selector,
             )
 
@@ -1916,11 +1970,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
                 skill_selector=selector,
             )
 
@@ -1947,11 +2000,10 @@ class CliAgentTests(unittest.TestCase):
                 session_store=_StubSessionStore(),
                 long_term_memory=[],
             )
+            _override_runtime_methods(app, build_agent=lambda *args, **kwargs: agent, run_agent_once=cli.run_once)
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=renderer,
-                build_agent=lambda *args, **kwargs: agent,
-                run_agent_once=cli.run_once,
                 skill_selector=selector,
             )
 
@@ -1969,6 +2021,8 @@ class CliAgentTests(unittest.TestCase):
         run_params = inspect.signature(router.ReplRouter._run_agent_line).parameters
 
         self.assertNotIn("memory_suggester", router_params)
+        for parameter_name in ["build_agent", "run_agent_once", "list_tools", "chat_fn", "build_branch_summary"]:
+            self.assertNotIn(parameter_name, router_params)
         self.assertNotIn("allow_memory_suggestions", run_params)
         self.assertFalse(hasattr(router.ReplRouter, "_maybe_suggest_memory"))
         self.assertFalse(hasattr(router, "_memory_suggestions_enabled"))
@@ -1979,15 +2033,18 @@ class CliAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
                 session_store=_StubSessionStore(),
                 long_term_memory=TextLongTermMemory(Path(tmp) / "memory"),
+            )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
             )
             router.ReplRouter(
                 app_runtime=app,
                 renderer=_CaptureRenderer(),
-                build_agent=lambda *args, **kwargs: _StubReactAgent(),
-                run_agent_once=_returning_run_once("assistant reply"),
                 confirm_memory=lambda suggestion: True,
             )
 
@@ -2018,15 +2075,18 @@ class CliAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
                 session_store=_StubSessionStore(),
                 long_term_memory=TextLongTermMemory(Path(tmp) / "memory"),
+            )
+            _override_runtime_methods(
+                app,
+                build_agent=build_agent,
+                run_agent_once=lambda *args, **kwargs: "assistant reply",
             )
             repl_router = router.ReplRouter(
                 app_runtime=app,
                 renderer=_CaptureRenderer(),
-                build_agent=build_agent,
-                run_agent_once=lambda *args, **kwargs: "assistant reply",
                 confirm_memory=lambda suggestion: True,
             )
             keep_running = repl_router.route("普通输入")
@@ -2046,15 +2106,18 @@ class CliAgentTests(unittest.TestCase):
             memory = TextLongTermMemory(Path(tmp) / "memory")
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
                 session_store=_StubSessionStore(),
                 long_term_memory=memory,
+            )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
             )
             router.ReplRouter(
                 app_runtime=app,
                 renderer=_CaptureRenderer(),
-                build_agent=lambda *args, **kwargs: _StubReactAgent(),
-                run_agent_once=_returning_run_once("assistant reply"),
                 confirm_memory=lambda item: confirmations.append(item) or True,
             )
 
@@ -2079,15 +2142,18 @@ class CliAgentTests(unittest.TestCase):
             memory = TextLongTermMemory(Path(tmp) / "memory")
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
                 session_store=_StubSessionStore(),
                 long_term_memory=memory,
+            )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
             )
             router.ReplRouter(
                 app_runtime=app,
                 renderer=_CaptureRenderer(),
-                build_agent=lambda *args, **kwargs: _StubReactAgent(),
-                run_agent_once=_returning_run_once("assistant reply"),
                 confirm_memory=lambda suggestion: False,
             )
 
@@ -2108,15 +2174,18 @@ class CliAgentTests(unittest.TestCase):
             memory.remember("不要自动写长期记忆", memory_type="feedback")
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
                 session_store=_StubSessionStore(),
                 long_term_memory=memory,
+            )
+            _override_runtime_methods(
+                app,
+                build_agent=lambda *args, **kwargs: _StubReactAgent(),
+                run_agent_once=_returning_run_once("assistant reply"),
             )
             router.ReplRouter(
                 app_runtime=app,
                 renderer=_CaptureRenderer(),
-                build_agent=lambda *args, **kwargs: _StubReactAgent(),
-                run_agent_once=_returning_run_once("assistant reply"),
                 confirm_memory=lambda suggestion: self.fail("重复记忆不应询问用户"),
             )
 
@@ -2211,11 +2280,11 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=_StubReactAgent()),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=_StubReactAgent()),
                 patch("builtins.input", side_effect=["/tree", "", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2236,11 +2305,11 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=agent),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
                 patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2259,12 +2328,12 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=_StubReactAgent()),
-                patch("cli_app.runner.generate_branch_summary", return_value="总结旧分支"),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=_StubReactAgent()),
+                patch("app_runtime.runtime.generate_branch_summary", return_value="总结旧分支"),
                 patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2284,11 +2353,11 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=agent),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
                 patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2315,12 +2384,12 @@ class CliAgentTests(unittest.TestCase):
             with (
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=agent),
-                patch("cli_app.runner.chat", return_value=ChatResponse(content="旧对话已压缩")),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
+                patch("app_runtime.runtime.default_chat", return_value=ChatResponse(content="旧对话已压缩")),
                 patch("builtins.input", side_effect=["/compact", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2349,12 +2418,12 @@ class CliAgentTests(unittest.TestCase):
                 patch.dict(os.environ, {"SHADOWCLI_COMPACT_MAX_TOKENS": "1"}, clear=False),
                 patch("cli_app.runner.load_dotenv"),
                 patch("app_runtime.runtime._configure_logging_once"),
-                patch("cli_app.runner.build_registry", return_value=runtime),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
                 patch("cli_app.runner.build_long_term_memory", return_value=TextLongTermMemory(Path(tmp) / "memory")),
                 patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
                 patch("cli_app.runner.load_mcp_config", return_value={}),
-                patch("cli_app.runner.build_agent", return_value=agent),
-                patch("cli_app.runner.chat", return_value=ChatResponse(content="旧对话已压缩")),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
+                patch("app_runtime.runtime.default_chat", return_value=ChatResponse(content="旧对话已压缩")),
                 patch("builtins.input", side_effect=["继续", EOFError]),
             ):
                 runner.repl(renderer=renderer)
@@ -2366,7 +2435,7 @@ class CliAgentTests(unittest.TestCase):
         self.assertIn("旧对话已压缩", agent.inputs[0][1])
 
     def test_cli_default_agent_is_react_agent(self):
-        agent = cli.build_agent(CaptureRegistry())
+        agent = ReactAgent(CaptureRegistry())
 
         self.assertIsInstance(agent, ReactAgent)
 
@@ -2376,8 +2445,8 @@ class CliAgentTests(unittest.TestCase):
     def test_build_long_term_memory_uses_project_memory_file_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             default_path = Path(tmp) / "agent_memory" / "memory"
-            with patch("cli_app.factories.DEFAULT_LONG_TERM_PATH", default_path):
-                memory = cli.build_long_term_memory()
+            with patch("memory.long_term.DEFAULT_LONG_TERM_PATH", default_path):
+                memory = build_long_term_memory()
 
             self.assertEqual(memory.storage_path, default_path)
             self.assertEqual(memory.storage_path.name, "memory")
@@ -2425,7 +2494,7 @@ class CliAgentTests(unittest.TestCase):
         react = _FailingReactAgent()
         output = io.StringIO()
 
-        with self.assertLogs("cli_app.runner", level="ERROR"):
+        with self.assertLogs("app_runtime.agent_execution", level="ERROR"):
             with contextlib.redirect_stdout(output):
                 cli.run_once(react, "你好")
 
@@ -2485,7 +2554,7 @@ class CliAgentTests(unittest.TestCase):
     def test_remember_command_writes_long_term_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
-            memory = cli.build_long_term_memory(memory_dir)
+            memory = build_long_term_memory(memory_dir)
 
             message = cli.handle_remember(memory, "/remember 用户偏好：默认使用 React")
 
@@ -2499,7 +2568,7 @@ class CliAgentTests(unittest.TestCase):
     def test_remember_command_accepts_explicit_memory_type(self):
         with tempfile.TemporaryDirectory() as tmp:
             memory_dir = Path(tmp) / "memory"
-            memory = cli.build_long_term_memory(memory_dir)
+            memory = build_long_term_memory(memory_dir)
 
             message = cli.handle_remember(memory, "/remember feedback 不要自动写长期记忆")
 
@@ -2511,7 +2580,7 @@ class CliAgentTests(unittest.TestCase):
 
     def test_memory_status_shows_long_term_count(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory = cli.build_long_term_memory(Path(tmp) / "memory")
+            memory = build_long_term_memory(Path(tmp) / "memory")
             memory.remember("用户偏好：默认使用 React")
 
             status = cli.format_memory_status(memory)
@@ -2524,7 +2593,7 @@ class CliAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "memory"
 
-            memory = cli.build_long_term_memory(path)
+            memory = build_long_term_memory(path)
 
             self.assertEqual(len(memory), 0)
 
@@ -2670,6 +2739,26 @@ def _returning_run_once(output):
         return output
 
     return run_once
+
+
+def _override_runtime_methods(app, *, build_agent=None, run_agent_once=None, list_tools=None, chat_fn=None, branch_summary=None):
+    if build_agent is not None:
+        def runtime_build_agent(*, conversation_messages=None, on_message_appended=None):
+            return build_agent(
+                app.tool_runtime,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+
+        app.build_agent = runtime_build_agent
+    if run_agent_once is not None:
+        app.run_agent_once = run_agent_once
+    if list_tools is not None:
+        app.list_tools = list_tools
+    if chat_fn is not None:
+        app.chat = chat_fn
+    if branch_summary is not None:
+        app.build_branch_summary = branch_summary
 
 
 class _StaticRuntimeContextBuilder:
@@ -3148,7 +3237,7 @@ class PiStyleToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = AppRuntime.create(
                 Path(tmp),
-                tool_runtime=cli.build_registry(),
+                tool_runtime=build_default_tool_runtime(),
             )
             registry = app.tool_runtime
         names = [d["function"]["name"] for d in registry.get_all_definitions()]

@@ -255,11 +255,15 @@ class RouterWorkerTests(unittest.TestCase):
                 agent.append("assistant", "reply")
                 return "reply"
 
+            runtime.build_agent = lambda *, conversation_messages=None, on_message_appended=None: build_agent(
+                runtime.tool_runtime,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+            runtime.run_agent_once = run_agent_once
             repl_router = ReplRouter(
                 app_runtime=runtime,
                 renderer=renderer,
-                build_agent=build_agent,
-                run_agent_once=run_agent_once,
                 run_interactive_in_worker=True,
             )
 
@@ -300,11 +304,15 @@ class RouterWorkerTests(unittest.TestCase):
                 agent.append("assistant", "late reply")
                 return "late reply"
 
+            runtime.build_agent = lambda *, conversation_messages=None, on_message_appended=None: build_agent(
+                runtime.tool_runtime,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+            runtime.run_agent_once = run_agent_once
             repl_router = ReplRouter(
                 app_runtime=runtime,
                 renderer=renderer,
-                build_agent=build_agent,
-                run_agent_once=run_agent_once,
                 run_interactive_in_worker=True,
             )
 
@@ -348,11 +356,15 @@ class RouterWorkerTests(unittest.TestCase):
                 second_context_ready.set()
                 return "ok"
 
+            runtime.build_agent = lambda *, conversation_messages=None, on_message_appended=None: build_agent(
+                runtime.tool_runtime,
+                conversation_messages=conversation_messages,
+                on_message_appended=on_message_appended,
+            )
+            runtime.run_agent_once = run_agent_once
             repl_router = ReplRouter(
                 app_runtime=runtime,
                 renderer=renderer,
-                build_agent=build_agent,
-                run_agent_once=run_agent_once,
                 run_interactive_in_worker=True,
             )
 

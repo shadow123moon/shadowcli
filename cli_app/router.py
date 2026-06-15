@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent import ReactAgent
 from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
-from llm import chat as default_chat
 from memory import MemoryProposal, ProposeMemoryTool
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
@@ -37,7 +35,6 @@ from .commands import (
     parse_tree_command,
 )
 from .constants import HELP, MEMORY_COMMAND
-from .factories import list_tools as default_list_tools
 from .terminal_input import SelectOption, select_from_menu
 from ui import (
     BranchNavigationChoice,
@@ -45,6 +42,9 @@ from ui import (
     ask_branch_navigation_choice,
     ask_memory_confirmation,
 )
+
+if TYPE_CHECKING:
+    from agent import ReactAgent
 
 DEFAULT_SKILL_TASK = "按 skill 指令执行"
 
@@ -78,12 +78,7 @@ class ReplRouter:
         *,
         app_runtime: AppRuntime,
         renderer: Renderer,
-        build_agent: Callable[..., ReactAgent],
-        run_agent_once: Callable[..., None],
-        list_tools: Callable[[Any], str] = default_list_tools,
         skill_selector: SkillSelector | None = None,
-        chat_fn: Callable[..., Any] = default_chat,
-        build_branch_summary: Callable[[NavigationPlan], str] | None = None,
         confirm_memory: Callable[[MemoryProposal], bool] = ask_memory_confirmation,
         run_interactive_in_worker: bool = False,
     ) -> None:
@@ -93,12 +88,7 @@ class ReplRouter:
         self.session_store = app_runtime.session_store
         self.long_term = app_runtime.long_term_memory
         self.renderer = renderer
-        self.build_agent = build_agent
-        self.run_agent_once = run_agent_once
-        self.list_tools = list_tools
         self.skill_selector = skill_selector
-        self.chat_fn = chat_fn
-        self.build_branch_summary = build_branch_summary
         self.confirm_memory = confirm_memory
         self.run_interactive_in_worker = run_interactive_in_worker
         _register_propose_memory_tool(self.runtime, self.long_term, confirm_memory=self.confirm_memory)
@@ -117,7 +107,7 @@ class ReplRouter:
             self.renderer.message(HELP)
             return True
         if line == "/tools":
-            self.renderer.message(self.list_tools(self.runtime))
+            self.renderer.message(self.app_runtime.list_tools())
             return True
         if line == "/cancel":
             if self.cancel_current(reason="slash_cancel"):
@@ -178,8 +168,7 @@ class ReplRouter:
 
     def attach_session(self, next_session: SessionManager) -> None:
         self.session = next_session
-        self.agent = self.build_agent(
-            self.runtime,
+        self.agent = self.app_runtime.build_agent(
             conversation_messages=self.session.messages(),
             on_message_appended=self.session.append_message,
         )
@@ -249,7 +238,7 @@ class ReplRouter:
         prepared = self.app_runtime.session_runtime.compact_agent_session(
             self.session,
             self.agent,
-            chat_fn=self.chat_fn,
+            chat_fn=self.app_runtime.chat,
         )
         self.runtime_context_builder = prepared.context_builder
         if prepared.compaction_result is not None:
@@ -312,14 +301,13 @@ class ReplRouter:
         self.renderer.message(f"✓ 加载 skill: {name}")
         if self.run_interactive_in_worker:
             buffer = TurnBuffer()
-            worker_agent = self.build_agent(
-                self.runtime,
+            worker_agent = self.app_runtime.build_agent(
                 conversation_messages=active_session.messages(),
                 on_message_appended=buffer.append,
             )
             self._start_worker_turn(active_session, agent_task, run_context_builder, worker_agent, buffer)
         else:
-            self.run_agent_once(
+            self.app_runtime.run_agent_once(
                 active_agent,
                 agent_task,
                 runtime_context_builder=run_context_builder,
@@ -336,8 +324,7 @@ class ReplRouter:
         if self.run_interactive_in_worker:
             active_session, context_builder = self.ensure_worker_session()
             buffer = TurnBuffer()
-            active_agent = self.build_agent(
-                self.runtime,
+            active_agent = self.app_runtime.build_agent(
                 conversation_messages=active_session.messages(),
                 on_message_appended=buffer.append,
             )
@@ -361,7 +348,7 @@ class ReplRouter:
             assert buffer is not None
             self._start_worker_turn(active_session, line, run_context_builder, active_agent, buffer)
         else:
-            self.run_agent_once(
+            self.app_runtime.run_agent_once(
                 active_agent,
                 line,
                 runtime_context_builder=run_context_builder,
@@ -389,7 +376,7 @@ class ReplRouter:
 
         def run(task) -> None:
             scoped_renderer = _TaskScopedRenderer(self.renderer, task_runtime, task)
-            self.run_agent_once(
+            self.app_runtime.run_agent_once(
                 worker_agent,
                 user_input,
                 runtime_context_builder=context_builder,
@@ -411,7 +398,7 @@ class ReplRouter:
         return self.app_runtime.skill_manager.select_auto_skill(
             line,
             selector=self.skill_selector,
-            chat_fn=self.chat_fn,
+            chat_fn=self.app_runtime.chat,
         )
 
     def _build_skill_context(
@@ -442,7 +429,7 @@ class ReplRouter:
             session,
             agent,
             context_builder,
-            chat_fn=self.chat_fn,
+            chat_fn=self.app_runtime.chat,
         )
         if prepared.warning:
             self.renderer.message(prepared.warning)
@@ -458,7 +445,7 @@ class ReplRouter:
                 self.session,
                 target_id,
                 choose_navigation=self.renderer.branch_navigation_choice,
-                build_branch_summary=self.build_branch_summary,
+                build_branch_summary=self.app_runtime.build_branch_summary,
             )
         except KeyError:
             self.renderer.message(f"未找到会话节点: {target_id}")

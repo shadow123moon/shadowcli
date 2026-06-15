@@ -30,7 +30,7 @@ class HookManager:
             return
         self._default_tool_hooks_installed = True
 
-        from tooling import register_freshness_guard
+        from tooling.file_tracker import register_freshness_guard
 
         register_freshness_guard(self)
 
