@@ -181,6 +181,24 @@ class TestPlanModeGuard(unittest.TestCase):
         self.plan_mode_active = False
         register_plan_mode_guard(self.runtime, lambda: self.plan_mode_active)
 
+    def test_register_guard_validates_runtime(self):
+        """Test guard registration validates runtime interface."""
+        # 没有 on_before_execute 方法
+        invalid_runtime = object()
+        with self.assertRaises(TypeError) as ctx:
+            register_plan_mode_guard(invalid_runtime, lambda: False)
+        self.assertIn("on_before_execute", str(ctx.exception))
+
+    def test_normalize_text_rejects_non_string(self):
+        """Test _normalize_text raises TypeError for non-string input."""
+        from sessions.plan_mode import _normalize_text
+        with self.assertRaises(TypeError):
+            _normalize_text(123)
+        with self.assertRaises(TypeError):
+            _normalize_text({"key": "value"})
+        with self.assertRaises(TypeError):
+            _normalize_text(["list", "item"])
+
     def test_allows_read_tools_in_plan_mode(self):
         self.plan_mode_active = True
         # 使用一个不存在的绝对路径

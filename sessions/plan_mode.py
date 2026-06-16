@@ -30,13 +30,28 @@ class PlanModeState:
         self.approved_plan = ""
 
     def exit(self, plan: str) -> None:
+        """退出 plan mode 并保存已批准的计划。
+
+        原子更新所有状态字段，减少不一致窗口期。
+
+        Args:
+            plan: 已批准的计划内容
+
+        Raises:
+            ValueError: 如果 plan 为空
+        """
         normalized = _normalize_text(plan)
         if not normalized:
             raise ValueError("approved plan is required")
-        self.approved_plan = normalized
-        self.mode = self.pre_mode or DEFAULT_MODE
-        self.pre_mode = None
-        self.task = ""
+
+        # 先构建新状态，再一次性应用（减少不一致窗口期）
+        new_state = {
+            "mode": self.pre_mode or DEFAULT_MODE,
+            "pre_mode": None,
+            "task": "",
+            "approved_plan": normalized,
+        }
+        self.__dict__.update(new_state)
 
     def reset(self) -> None:
         self.mode = DEFAULT_MODE
@@ -98,5 +113,20 @@ def format_plan_mode_status(state: PlanModeState) -> str:
     ])
 
 
-def _normalize_text(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())
+def _normalize_text(value: str | None) -> str:
+    """规范化文本中的空白字符。
+
+    Args:
+        value: 输入文本或 None
+
+    Returns:
+        规范化后的文本，None 或空字符串返回空字符串
+
+    Raises:
+        TypeError: 如果输入不是 str 或 None
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str or None, got {type(value).__name__}")
+    return " ".join(value.strip().split())
