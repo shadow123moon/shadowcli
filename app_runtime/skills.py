@@ -1,28 +1,33 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from plugin_runtime import PluginManager
 from skills import (
     SkillContextBuilder,
     SkillDefinition,
     SkillRegistry,
     SkillSelection,
     SkillSelector,
+    SkillRoot,
     auto_skills_enabled,
 )
+from skills.sources import dedupe_roots, env_skill_roots
 
 from .events import EventBus
 from .state import AppStateStore
 
 
+SKILL_ROOT = Path(".agents") / "skills"
+SKILL_ROOTS_ENV = "SHADOWCLI_SKILL_ROOTS"
+
+
 @dataclass
 class SkillManager:
     cwd: Path
-    plugin_manager: PluginManager
     registry: SkillRegistry
     state_store: AppStateStore
     event_bus: EventBus | None = None
@@ -32,37 +37,26 @@ class SkillManager:
         cls,
         cwd: Path | str,
         *,
+        skill_roots: list[SkillRoot] | None = None,
         state_store: AppStateStore | None = None,
         event_bus: EventBus | None = None,
     ) -> "SkillManager":
         project_cwd = Path(cwd)
         store = state_store or AppStateStore.create(project_cwd)
-        plugin_manager, registry = build_plugin_skill_registry(project_cwd, state_store=store)
+        roots = build_skill_roots(project_cwd) if skill_roots is None else skill_roots
+        registry = SkillRegistry(project_cwd, roots=roots)
         return cls(
             cwd=project_cwd,
-            plugin_manager=plugin_manager,
             registry=registry,
             state_store=store,
             event_bus=event_bus,
         )
 
-    def refresh(self) -> SkillRegistry:
-        self.plugin_manager, self.registry = build_plugin_skill_registry(self.cwd, state_store=self.state_store)
+    def refresh(self, *, skill_roots: list[SkillRoot] | None = None) -> SkillRegistry:
+        roots = build_skill_roots(self.cwd) if skill_roots is None else skill_roots
+        self.registry = SkillRegistry(self.cwd, roots=roots)
         self._publish("skills.refreshed", cwd=self.cwd)
         return self.registry
-
-    def plugin_status(self) -> tuple[list[Any], list[Any]]:
-        return self.plugin_manager.list_plugins(), self.plugin_manager.diagnostics()
-
-    def set_plugin_enabled(self, name: str, enabled: bool) -> bool:
-        known = {plugin.manifest.id for plugin in self.plugin_manager.list_plugins()}
-        if name not in known:
-            return False
-
-        self.state_store.set_plugin_enabled(name, enabled)
-        self.refresh()
-        self._publish("plugin.enabled" if enabled else "plugin.disabled", name=name)
-        return True
 
     def build_context(self, name: str, base: Any, *, arguments: str) -> SkillContextBuilder:
         loaded_skill = self.registry.load(name)
@@ -101,13 +95,12 @@ class SkillManager:
             self.event_bus.publish(event_type, **payload)
 
 
-def build_plugin_skill_registry(
-    cwd: Path | str,
-    *,
-    state_store: AppStateStore | None = None,
-) -> tuple[PluginManager, SkillRegistry]:
+def build_skill_roots(cwd: Path | str, *, plugin_roots: list[SkillRoot] | None = None) -> list[SkillRoot]:
     project_cwd = Path(cwd)
-    store = state_store or AppStateStore.create(project_cwd)
-    plugin_manager = PluginManager(project_cwd, enabled_plugins=store.enabled_plugins())
-    registry = SkillRegistry(project_cwd, extra_roots=plugin_manager.skill_roots())
-    return plugin_manager, registry
+    roots = [
+        SkillRoot(source="project", path=project_cwd / SKILL_ROOT),
+    ]
+    roots.extend(plugin_roots or [])
+    roots.extend(env_skill_roots(os.getenv(SKILL_ROOTS_ENV, "")))
+    roots.append(SkillRoot(source="global", path=Path.home() / ".agents" / "skills"))
+    return dedupe_roots(roots)

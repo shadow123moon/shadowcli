@@ -15,7 +15,7 @@ import cli_app as cli
 from agent.agent_loop import AgentLoop
 from agent.prompts import react_agent_prompt
 from agent.react_agent import ReactAgent
-from app_runtime import AppRuntime
+from app_runtime import AppRuntime, build_skill_roots
 from llm import ChatResponse, FunctionCall, Message, ToolCall
 from llm.client import StreamEvent
 from memory import MemoryProposal, TextLongTermMemory, build_long_term_memory
@@ -34,7 +34,7 @@ from skills import (
     SkillSelector,
     auto_skill_candidates,
 )
-from plugin_runtime import PluginManager, PluginStateStore
+from plugin_runtime import PluginContributions, PluginManager, PluginStateStore
 from tooling import (
     BashTool,
     EditTool,
@@ -42,6 +42,7 @@ from tooling import (
     GrepTool,
     LsTool,
     ReadTool,
+    Tool,
     ToolRegistry,
     WebFetchTool,
     WebSearchTool,
@@ -66,6 +67,27 @@ class CaptureRegistry:
 
     def get_all_definitions(self):
         return []
+
+
+class _SchemaTool(Tool):
+    def __init__(self, name: str, parameters: dict):
+        self._name = name
+        self._parameters = parameters
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f"{self._name} tool"
+
+    @property
+    def parameters(self) -> dict:
+        return self._parameters
+
+    def execute(self, arguments: dict) -> str:
+        return "ok"
 
 
 class ModuleLayoutTests(unittest.TestCase):
@@ -135,6 +157,27 @@ class ModuleLayoutTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
+    def test_registry_without_roots_does_not_discover_skill_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "\n".join([
+                    "---",
+                    "name: code-review",
+                    "description: Review code changes.",
+                    "---",
+                    "",
+                    "Review code.",
+                ]),
+                encoding="utf-8",
+            )
+
+            skills = SkillRegistry(root).list()
+
+        self.assertEqual(skills, [])
+
     def test_scan_discovers_skill_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -303,7 +346,7 @@ class SkillRegistryTests(unittest.TestCase):
             self.assertEqual(registry.find("review"), definition)
             self.assertEqual(calls, 1)
 
-    def test_default_roots_ignore_plugin_skill_dirs_without_manifest_gate(self):
+    def test_runtime_skill_roots_ignore_plugin_skill_dirs_without_manifest_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project_skill = root / ".agents" / "skills" / "code-review"
@@ -333,7 +376,7 @@ class SkillRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            skills = SkillRegistry(root).list()
+            skills = SkillRegistry(root, roots=build_skill_roots(root)).list()
 
         self.assertTrue(any(skill.path == project_skill / "SKILL.md" for skill in skills))
         self.assertFalse(any(skill.path == plugin_skill / "SKILL.md" for skill in skills))
@@ -412,7 +455,7 @@ class SkillRegistryTests(unittest.TestCase):
 
             skill = SkillRegistry(
                 root,
-                extra_roots=PluginManager(root).skill_roots(),
+                roots=build_skill_roots(root, plugin_roots=PluginManager(root).contributions().skill_roots),
             ).find("review")
 
         self.assertEqual(skill.source, "project")
@@ -443,7 +486,10 @@ class SkillRegistryTests(unittest.TestCase):
 
             registry = SkillRegistry(
                 root,
-                extra_roots=[SkillRoot(source="plugin:superpowers", path=root / "plugins" / "superpowers" / "skills")],
+                roots=[
+                    SkillRoot(source="project", path=root / ".agents" / "skills"),
+                    SkillRoot(source="plugin:superpowers", path=root / "plugins" / "superpowers" / "skills"),
+                ],
             )
 
             self.assertEqual(registry.find("review").description, "Project review.")
@@ -470,7 +516,7 @@ class SkillRegistryTests(unittest.TestCase):
 
             skills = SkillRegistry(
                 root,
-                extra_roots=[SkillRoot(source="superpowers", path=external_root)],
+                roots=[SkillRoot(source="superpowers", path=external_root)],
             ).list()
 
         self.assertEqual(skills[0].name, "test-driven-development")
@@ -496,7 +542,7 @@ class SkillRegistryTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"SHADOWCLI_SKILL_ROOTS": f"superpowers={external_root}"}):
-                skills = SkillRegistry(root).list()
+                skills = SkillRegistry(root, roots=build_skill_roots(root)).list()
 
         matches = [skill for skill in skills if skill.name == "brainstorming"]
         self.assertEqual(len(matches), 1)
@@ -565,7 +611,7 @@ class PluginManagerTests(unittest.TestCase):
             manager = PluginManager(root, extra_plugin_roots=[plugin_root])
 
             self.assertEqual(manager.diagnostics(), [])
-            self.assertEqual(manager.skill_roots(), [
+            self.assertEqual(manager.contributions().skill_roots, [
                 SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve()),
             ])
 
@@ -578,14 +624,14 @@ class PluginManagerTests(unittest.TestCase):
 
             disabled = PluginManager(root)
 
-            self.assertEqual(disabled.skill_roots(), [])
+            self.assertEqual(disabled.contributions().skill_roots, [])
             self.assertFalse(disabled.list_plugins()[0].enabled)
 
             PluginStateStore(root).enable("superpowers")
             enabled = PluginManager(root)
 
             self.assertTrue(enabled.list_plugins()[0].enabled)
-            self.assertEqual(enabled.skill_roots(), [
+            self.assertEqual(enabled.contributions().skill_roots, [
                 SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve()),
             ])
 
@@ -600,7 +646,7 @@ class PluginManagerTests(unittest.TestCase):
             _write_codex_plugin_manifest(plugin_root, name="github", skills=["./skills", "./more-skills"])
             PluginStateStore(root).enable("github")
 
-            roots = PluginManager(root, extra_plugin_roots=[plugin_root]).skill_roots()
+            roots = PluginManager(root, extra_plugin_roots=[plugin_root]).contributions().skill_roots
 
         self.assertEqual(
             roots,
@@ -621,7 +667,7 @@ class PluginManagerTests(unittest.TestCase):
             PluginStateStore(root).enable("superpowers")
 
             with patch.dict(os.environ, {"SHADOWCLI_PLUGIN_ROOTS": str(plugin_root)}):
-                roots = PluginManager(root).skill_roots()
+                roots = PluginManager(root).contributions().skill_roots
 
         self.assertEqual(roots, [SkillRoot(source="plugin:superpowers", path=(plugin_root / "skills").resolve())])
 
@@ -634,7 +680,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertEqual(manager.diagnostics(), [])
 
     def test_root_plugin_json_is_ignored(self):
@@ -655,7 +701,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertEqual(manager.diagnostics(), [])
 
     def test_skill_path_must_be_string(self):
@@ -666,7 +712,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertTrue(any("skills[0].path" in diagnostic.message for diagnostic in manager.diagnostics()))
 
     def test_skill_path_must_start_with_dot_slash(self):
@@ -678,7 +724,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertTrue(any("must start with './'" in diagnostic.message for diagnostic in manager.diagnostics()))
 
     def test_skill_path_cannot_escape_plugin_root(self):
@@ -689,7 +735,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertTrue(any("outside plugin root" in diagnostic.message for diagnostic in manager.diagnostics()))
 
     def test_skill_path_must_point_to_directory(self):
@@ -702,7 +748,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertTrue(any("must point to a directory" in diagnostic.message for diagnostic in manager.diagnostics()))
 
     def test_manifest_requires_name_and_version(self):
@@ -720,7 +766,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             messages = [diagnostic.message for diagnostic in manager.diagnostics()]
             self.assertTrue(any("name must be a non-empty string" in message for message in messages))
             self.assertTrue(any("version must be a non-empty string" in message for message in messages))
@@ -734,7 +780,7 @@ class PluginManagerTests(unittest.TestCase):
 
             manager = PluginManager(root)
 
-            self.assertEqual(manager.skill_roots(), [])
+            self.assertEqual(manager.contributions().skill_roots, [])
             self.assertTrue(any("name must be kebab-case" in diagnostic.message for diagnostic in manager.diagnostics()))
 
     def test_codex_plugin_name_can_differ_from_cache_directory_name(self):
@@ -749,9 +795,25 @@ class PluginManagerTests(unittest.TestCase):
             manager = PluginManager(root)
 
             self.assertEqual(manager.diagnostics(), [])
-            self.assertEqual(manager.skill_roots(), [
+            self.assertEqual(manager.contributions().skill_roots, [
                 SkillRoot(source="plugin:superpowers", path=skill_root.resolve()),
             ])
+
+    def test_plugin_manager_exposes_enabled_contributions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "superpowers"
+            skill_root = plugin_root / "skills"
+            skill_root.mkdir(parents=True)
+            _write_codex_plugin_manifest(plugin_root, name="superpowers", skills="./skills")
+            PluginStateStore(root).enable("superpowers")
+
+            contributions = PluginManager(root).contributions()
+
+        self.assertIsInstance(contributions, PluginContributions)
+        self.assertEqual(contributions.skill_roots, [
+            SkillRoot(source="plugin:superpowers", path=skill_root.resolve()),
+        ])
 
 
 class AppRuntimeTests(unittest.TestCase):
@@ -784,7 +846,8 @@ class AppRuntimeTests(unittest.TestCase):
         self.assertIs(app.session_runtime.long_term_memory, long_term)
         self.assertIsInstance(app.skill_manager, SkillManager)
         self.assertIs(app.skill_manager.state_store, app.state_store)
-        self.assertIsInstance(app.skill_manager.plugin_manager, PluginManager)
+        self.assertIsInstance(app.plugin_manager, PluginManager)
+        self.assertFalse(hasattr(app.skill_manager, "plugin_manager"))
         self.assertIsInstance(app.skill_manager.registry, SkillRegistry)
 
     def test_app_runtime_loads_mcp_tools_into_tool_runtime(self):
@@ -1013,7 +1076,7 @@ class ReactAgentTests(unittest.TestCase):
         self.assertNotIn("session_messages", params)
         self.assertNotIn("message_sink", params)
 
-    def test_react_turn_uses_external_context_without_persisting_augmented_user_text(self):
+    def test_react_turn_persists_exact_user_text_sent_to_model(self):
         calls = []
         agent = ReactAgent(CaptureRegistry())
 
@@ -1023,16 +1086,17 @@ class ReactAgentTests(unittest.TestCase):
         prompt = calls[0][0][-1].content
         self.assertIn("## 相关长期记忆", prompt)
         self.assertIn("用户偏好：普通输入走 React", prompt)
+        self.assertIn("以下上下文只适用于本条消息末尾的“当前任务”", prompt)
         self.assertIn("当前任务：入口和 React 怎么安排？", prompt)
         self.assertTrue(any(
             message.role == "user"
-            and message.content == "入口和 React 怎么安排？"
+            and message.content
+            and "## 相关长期记忆" in message.content
             for message in agent.conversation_messages
         ))
         self.assertFalse(any(
             message.role == "user"
-            and message.content
-            and "## 相关长期记忆" in message.content
+            and message.content == "入口和 React 怎么安排？"
             for message in agent.conversation_messages
         ))
 
@@ -1097,6 +1161,30 @@ class RuntimeContextBuilderTests(unittest.TestCase):
         self.assertIn("## 相关长期记忆", context)
         self.assertIn("用户偏好：普通输入走 React", context)
         self.assertNotIn("短期对话不应该重复注入", context)
+
+
+class ToolRegistryTests(unittest.TestCase):
+    def test_definitions_are_exported_in_cache_stable_order(self):
+        first = ToolRegistry().register(
+            _SchemaTool("zeta", {"type": "object", "required": ["b", "a"]})
+        ).register(
+            _SchemaTool("alpha", {"required": ["y", "x"], "type": "object"})
+        )
+        second = ToolRegistry().register(
+            _SchemaTool("alpha", {"type": "object", "required": ["x", "y"]})
+        ).register(
+            _SchemaTool("zeta", {"required": ["a", "b"], "type": "object"})
+        )
+
+        self.assertEqual(first.get_all_definitions(), second.get_all_definitions())
+        self.assertEqual(
+            [item["function"]["name"] for item in first.get_all_definitions()],
+            ["alpha", "zeta"],
+        )
+        self.assertEqual(
+            first.get_all_definitions()[0]["function"]["parameters"]["required"],
+            ["x", "y"],
+        )
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -1223,6 +1311,10 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Token 预算已用尽", content)
         self.assertEqual(registry.executed, [])
         self.assertEqual(len(calls), 1)
+        assistant = next(message for message in agent.conversation_history if message.role == "assistant")
+        self.assertEqual(assistant.metadata["usage"]["input_tokens"], 9)
+        self.assertEqual(assistant.metadata["usage"]["cached_input_tokens"], 2)
+        self.assertEqual(assistant.metadata["usage"]["output_tokens"], 3)
 
     def test_repeated_tool_calls_are_detected_across_model_iterations(self):
         calls = []
@@ -1463,6 +1555,8 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(cli.parse_skill_command("/skill code-review"), ("code-review", ""))
         self.assertEqual(cli.parse_skill_command("/skill code-review 检查当前改动"), ("code-review", "检查当前改动"))
         self.assertIsNone(cli.parse_skill_command("/skillcode-review 检查当前改动"))
+        self.assertTrue(cli.parse_tokens_command("/tokens"))
+        self.assertFalse(cli.parse_tokens_command("/tokens now"))
         self.assertTrue(cli.parse_tree_command("/tree"))
         self.assertFalse(cli.parse_tree_command("/tree now"))
         self.assertEqual(cli.parse_jump_command("/jump"), "")
@@ -1542,6 +1636,24 @@ class CliAgentTests(unittest.TestCase):
         self.assertIn("assistant", tree)
         self.assertIn("旧分支问题", tree)
         self.assertIn("<- current", tree)
+
+    def test_format_token_usage_summarizes_current_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = SessionStore(root=Path(tmp) / "sessions").create(Path(tmp) / "project")
+            session.append_message(Message(role="user", content="hi"))
+            session.append_message(Message(
+                role="assistant",
+                content="hello",
+                metadata={"usage": {"input_tokens": 1000, "cached_input_tokens": 900, "output_tokens": 50}},
+            ))
+
+            status = cli.format_token_usage(session)
+
+        self.assertIn("输入（命中缓存）: 900", status)
+        self.assertIn("输入（未命中缓存）: 100", status)
+        self.assertIn("输出            : 50", status)
+        self.assertIn("总量            : 1,050", status)
+        self.assertIn("90.0%", status)
 
     def test_repl_builds_agent_with_tool_runtime_and_message_callback_on_first_message(self):
         runtime = ToolRuntime(ToolRegistry())
@@ -1810,7 +1922,7 @@ class CliAgentTests(unittest.TestCase):
                 return ChatResponse(content='{"skill": "superpowers:brainstorming", "reason": "需要先澄清新功能"}')
 
             selection = SkillSelector(
-                SkillRegistry(cwd, extra_roots=manager.skill_roots()),
+                SkillRegistry(cwd, roots=build_skill_roots(cwd, plugin_roots=manager.contributions().skill_roots)),
                 chat_fn=fake_chat,
             ).select("我要加一个新功能")
 
@@ -2294,6 +2406,36 @@ class CliAgentTests(unittest.TestCase):
         self.assertIn(old_leaf_id, output)
         self.assertIn("current", output)
 
+    def test_repl_tokens_command_prints_current_session_usage(self):
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer()
+        agent = _StubReactAgent()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            session = SessionStore(root=Path(tmp) / "sessions").create(cwd)
+            session.append_message(Message(role="assistant", content="hi", metadata={
+                "usage": {"input_tokens": 100, "cached_input_tokens": 75, "output_tokens": 10}
+            }))
+            import cli_app.runner as runner
+            with (
+                patch("cli_app.runner.load_dotenv"),
+                patch("app_runtime.runtime._configure_logging_once"),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
+                patch("builtins.input", side_effect=["/tokens", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        output = "\n".join(renderer.messages)
+        self.assertIn("当前会话 token 用量", output)
+        self.assertIn("输入（命中缓存）: 75", output)
+        self.assertEqual(agent.inputs, [])
+
     def test_repl_jump_command_moves_leaf_and_reloads_agent_history(self):
         runtime = ToolRuntime(ToolRegistry())
         agent = _StubReactAgent()
@@ -2480,15 +2622,35 @@ class CliAgentTests(unittest.TestCase):
 
     def test_run_once_passes_context_to_agent_events(self):
         react = _StubReactAgent()
+        cancel = threading.Event()
+        journal = object()
 
         with contextlib.redirect_stdout(io.StringIO()):
             cli.run_once(
                 react,
                 "你好",
                 runtime_context_builder=_StaticRuntimeContextBuilder("## 相关长期记忆\n- fact"),
+                cancel=cancel,
+                journal=journal,
+                turn_id="turn-1",
             )
 
         self.assertEqual(react.inputs, [("你好", "## 相关长期记忆\n- fact")])
+        self.assertEqual(
+            react.runtime_kwargs,
+            [{"cancel": cancel, "journal": journal, "turn_id": "turn-1"}],
+        )
+
+    def test_run_once_rejects_legacy_agent_events_signature(self):
+        react = _LegacyReactAgent()
+        renderer = _CaptureRenderer()
+
+        with self.assertLogs("app_runtime.agent_execution", level="ERROR"):
+            result = cli.run_once(react, "你好", renderer=renderer)
+
+        self.assertEqual(result, "")
+        self.assertEqual(react.inputs, [])
+        self.assertTrue(any("[ERROR] 执行失败" in message for message in renderer.messages))
 
     def test_run_once_error_prints_clean_message_without_traceback(self):
         react = _FailingReactAgent()
@@ -2678,10 +2840,12 @@ class TerminalBranchNavigationTests(unittest.TestCase):
 class _StubReactAgent:
     def __init__(self):
         self.inputs = []
+        self.runtime_kwargs = []
         self.reloaded = []
 
-    def events(self, user_input, context=""):
+    def events(self, user_input, context="", *, cancel=None, journal=None, turn_id=None):
         self.inputs.append((user_input, context))
+        self.runtime_kwargs.append({"cancel": cancel, "journal": journal, "turn_id": turn_id})
         yield StreamEvent("content", f"react:{user_input}")
         yield StreamEvent("done", {"reason": "finished"})
 
@@ -2690,6 +2854,19 @@ class _StubReactAgent:
 
     def replace_conversation_messages(self, messages):
         self.reloaded.append(list(messages))
+
+
+class _LegacyReactAgent:
+    def __init__(self):
+        self.inputs = []
+
+    def events(self, user_input, context=""):
+        self.inputs.append((user_input, context))
+        yield StreamEvent("content", f"legacy:{user_input}")
+        yield StreamEvent("done", {"reason": "finished"})
+
+    def cancel(self):
+        return None
 
 
 class _CaptureRenderer:
@@ -2715,7 +2892,7 @@ class _CaptureRenderer:
 
 
 class _FailingReactAgent:
-    def events(self, user_input, context=""):
+    def events(self, user_input, context="", *, cancel=None, journal=None, turn_id=None):
         raise RuntimeError("boom")
 
     def cancel(self):

@@ -55,7 +55,7 @@ def repl(renderer: Renderer | None = None) -> int:
         session_store=SessionStore(),
         long_term_builder=build_long_term_memory,
     )
-    _log_plugin_diagnostics(app_runtime.skill_manager.plugin_manager)
+    _log_plugin_diagnostics(app_runtime.plugin_manager)
 
     try:
         mcp_loaded, mcp_failed = app_runtime.load_mcp_tools(load_mcp_config())

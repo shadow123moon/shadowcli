@@ -7,6 +7,7 @@ from skills import SkillRoot
 
 from .manifest import (
     LoadedPlugin,
+    PluginContributions,
     PluginDiagnostic,
     PluginManifest,
     PluginSkillContribution,
@@ -47,12 +48,12 @@ class PluginManager:
         assert self._loaded is not None
         return list(self._loaded)
 
-    def skill_roots(self) -> list[SkillRoot]:
-        roots = []
+    def contributions(self) -> PluginContributions:
+        skill_roots = []
         for plugin in self.list_plugins():
             if plugin.enabled:
-                roots.extend(plugin.skill_roots)
-        return roots
+                skill_roots.extend(plugin.contributions.skill_roots)
+        return PluginContributions(skill_roots=skill_roots)
 
     def diagnostics(self) -> list[PluginDiagnostic]:
         self._ensure_loaded()
@@ -81,11 +82,13 @@ class PluginManager:
             if manifest is None:
                 continue
 
-            skill_roots = _skill_roots_for_plugin(plugin_root, manifest, diagnostics)
+            contributions = PluginContributions(
+                skill_roots=_skill_roots_for_plugin(plugin_root, manifest, diagnostics),
+            )
             plugins.append(LoadedPlugin(
                 root=plugin_root,
                 manifest=manifest,
-                skill_roots=skill_roots,
+                contributions=contributions,
                 enabled=manifest.id in enabled_plugins,
             ))
 

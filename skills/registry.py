@@ -5,22 +5,20 @@ from pathlib import Path
 from .assets import rewrite_plugin_skill_paths
 from .loader import read_skill_file, read_skill_root, split_frontmatter
 from .references import parse_namespaced_skill, source_candidates_for_reference
-from .sources import default_skill_roots
 from .types import LoadedSkill, SkillDefinition, SkillDiagnostic, SkillRoot
 
 
 class SkillRegistry:
-    """Discover and load repo-scoped agent skills."""
+    """Load skills from explicit roots."""
 
     def __init__(
         self,
         root: Path | str,
         *,
         roots: list[SkillRoot] | None = None,
-        extra_roots: list[SkillRoot] | None = None,
     ):
         self.root = Path(root)
-        self.roots = roots if roots is not None else default_skill_roots(self.root, extra_roots=extra_roots)
+        self.roots = list(roots or [])
         self._diagnostics: list[SkillDiagnostic] | None = None
 
     def list(self) -> list[SkillDefinition]:

@@ -66,7 +66,11 @@ class SessionRuntime:
         )
 
     def build_context(self, session: Any) -> RuntimeContextBuilder:
-        return RuntimeContextBuilder(session=session, long_term=self.long_term_memory)
+        return RuntimeContextBuilder(
+            session=session,
+            long_term=self.long_term_memory,
+            plan_mode=getattr(session.meta, "plan_mode", None),
+        )
 
 
 def reload_agent_conversation(agent: Any, session: Any) -> None:

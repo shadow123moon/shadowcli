@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List
 
 from .base import Tool
@@ -27,8 +28,26 @@ class ToolRegistry:
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters,
+                    "parameters": _canonicalize_schema(tool.parameters),
                 },
             }
-            for tool in self._tools.values()
+            for _, tool in sorted(self._tools.items())
         ]
+
+
+def _canonicalize_schema(value: Any, *, parent_key: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonicalize_schema(value[key], parent_key=str(key))
+            for key in sorted(value)
+        }
+    if isinstance(value, list):
+        items = [_canonicalize_schema(item) for item in value]
+        if parent_key == "required":
+            return sorted(items, key=_stable_json)
+        return items
+    return value
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

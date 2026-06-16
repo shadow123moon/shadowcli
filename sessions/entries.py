@@ -63,6 +63,8 @@ def entry_to_dict(entry: SessionEntry) -> dict:
             data["tool_calls"] = [_tool_call_to_dict(tool_call) for tool_call in entry.message.tool_calls]
         if entry.message.tool_call_id:
             data["tool_call_id"] = entry.message.tool_call_id
+        if entry.message.metadata:
+            data["metadata"] = entry.message.metadata
         return data
 
     if isinstance(entry, CompactionEntry):
@@ -102,6 +104,7 @@ def entry_from_dict(data: dict) -> SessionEntry | None:
                 content=data.get("content"),
                 tool_calls=[_tool_call_from_dict(item) for item in data.get("tool_calls") or []] or None,
                 tool_call_id=data.get("tool_call_id"),
+                metadata=_normalize_metadata(data.get("metadata")),
             ),
         )
     if entry_type == "compaction":
@@ -159,3 +162,9 @@ def _normalize_details(details: dict | None) -> EntryDetails:
         "read_files": [str(item) for item in raw.get("read_files") or []],
         "modified_files": [str(item) for item in raw.get("modified_files") or []],
     }
+
+
+def _normalize_metadata(metadata: dict | None) -> dict | None:
+    if not isinstance(metadata, dict) or not metadata:
+        return None
+    return dict(metadata)

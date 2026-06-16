@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from llm import FunctionCall, Message, ToolCall, chat_stream
+from llm.usage import normalize_usage, usage_to_metadata
 from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
@@ -79,8 +80,7 @@ class AgentLoop:
         """Execute one task and yield StreamEvent objects."""
         from llm.client import StreamEvent
 
-        task_index = len(self.conversation_history)
-        self._append_message(Message(role="user", content=task.content))
+        self._append_message(Message(role="user", content=_compose_task_content(task.content, context)))
         budget = AgentBudget.from_env()
 
         for _turn in range(budget.hard_max_iterations):
@@ -105,7 +105,7 @@ class AgentLoop:
 
             try:
                 for event in chat_stream(
-                    self._messages_for_model(task_index, context),
+                    self._messages_for_model(),
                     tools=tools_schema,
                     cancel=self.cancel,
                 ):
@@ -135,9 +135,11 @@ class AgentLoop:
                 yield StreamEvent("done", {"reason": "error"})
                 return
 
+            usage_metadata = usage_to_metadata(usage_data)
             response_msg = Message(
                 role="assistant",
                 content="".join(content_parts) or None,
+                metadata={"usage": usage_metadata} if usage_metadata else None,
                 tool_calls=[
                     ToolCall(
                         id=tc["id"],
@@ -189,18 +191,8 @@ class AgentLoop:
         self.conversation_history.append(Message(role="system", content=self._system_prompt))
         self.conversation_history.extend(existing)
 
-    def _messages_for_model(self, task_index: int, context: str) -> list[Message]:
-        if not context:
-            return self.conversation_history
-        messages = list(self.conversation_history)
-        task = messages[task_index]
-        messages[task_index] = Message(
-            role=task.role,
-            content=f"{context}\n\n当前任务：{task.content}",
-            tool_calls=task.tool_calls,
-            tool_call_id=task.tool_call_id,
-        )
-        return messages
+    def _messages_for_model(self) -> list[Message]:
+        return self.conversation_history
 
     def _append_message(self, message: Message) -> None:
         self.conversation_history.append(message)
@@ -325,13 +317,24 @@ class AgentLoop:
 
 
 def _record_usage(budget: AgentBudget, usage: dict | None) -> None:
-    if not usage:
+    normalized = normalize_usage(usage)
+    if normalized.total_tokens <= 0 and normalized.cached_input_tokens <= 0:
         return
-    input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-    output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
-    cached = int(details.get("cached_tokens") or usage.get("cached_input_tokens") or 0)
-    budget.record_tokens(input_tokens, output_tokens, cached=cached)
+    budget.record_tokens(
+        normalized.input_tokens,
+        normalized.output_tokens,
+        cached=normalized.cached_input_tokens,
+    )
+
+
+def _compose_task_content(task_content: str | None, context: str) -> str | None:
+    if not context:
+        return task_content
+    return "\n\n".join([
+        "## 本轮上下文说明\n以下上下文只适用于本条消息末尾的“当前任务”；后续历史中看到它时只当作旧任务记录，不代表当前任务仍然启用。",
+        context,
+        f"当前任务：{task_content or ''}",
+    ])
 
 
 def _tool_call_from_data(tc: dict) -> ToolCall:

@@ -35,10 +35,15 @@ class PluginManifest:
 
 
 @dataclass(frozen=True)
+class PluginContributions:
+    skill_roots: list[SkillRoot]
+
+
+@dataclass(frozen=True)
 class LoadedPlugin:
     root: Path
     manifest: PluginManifest
-    skill_roots: list[SkillRoot]
+    contributions: PluginContributions
     enabled: bool = False
 
 

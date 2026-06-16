@@ -51,6 +51,7 @@ class SessionMeta:
     model: str | None = None
     provider: str | None = None
     message_count: int = 0
+    plan_mode: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -66,4 +67,5 @@ class SessionMeta:
             model=data.get("model"),
             provider=data.get("provider"),
             message_count=int(data.get("message_count", 0)),
+            plan_mode=data.get("plan_mode") if isinstance(data.get("plan_mode"), dict) else None,
         )

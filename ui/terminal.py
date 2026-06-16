@@ -158,7 +158,7 @@ def _console(out: TextIO | None = None):
         file=out or sys.stdout,
         force_terminal=_stream_is_tty(out),
         theme=_TERMINAL_THEME,
-        soft_wrap=True,
+        soft_wrap=False,
     )
 
 

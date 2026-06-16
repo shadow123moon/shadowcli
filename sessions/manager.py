@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from llm import Message
+from llm.usage import TokenUsage, sum_token_usage
 
 from .entries import (
     BranchSummaryEntry,
@@ -191,6 +192,19 @@ class SessionManager:
             elif isinstance(entry, BranchSummaryEntry):
                 sections.append(_format_branch_summary(entry))
         return "\n\n".join(section for section in sections if section)
+
+    def token_usage(self) -> TokenUsage:
+        return sum_token_usage(
+            entry.message.metadata.get("usage")
+            for entry in self.get_branch()
+            if isinstance(entry, MessageEntry)
+            and isinstance(entry.message.metadata, dict)
+            and isinstance(entry.message.metadata.get("usage"), dict)
+        )
+
+    def update_plan_mode(self, state: dict | None) -> None:
+        self.meta.plan_mode = state
+        self._persist_meta(_now_iso())
 
     def all_entries(self) -> list[SessionEntry]:
         return list(self._entries)

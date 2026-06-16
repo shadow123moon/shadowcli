@@ -6,22 +6,6 @@ from pathlib import Path
 from .types import SkillRoot
 
 
-SKILL_ROOT = Path(".agents") / "skills"
-SKILL_ROOTS_ENV = "SHADOWCLI_SKILL_ROOTS"
-
-
-def default_skill_roots(root: Path, *, extra_roots: list[SkillRoot] | None = None) -> list[SkillRoot]:
-    project_root = Path(root)
-    roots = [
-        SkillRoot(source="project", path=project_root / SKILL_ROOT),
-    ]
-
-    roots.extend(extra_roots or [])
-    roots.extend(env_skill_roots(os.getenv(SKILL_ROOTS_ENV, "")))
-    roots.append(SkillRoot(source="global", path=Path.home() / ".agents" / "skills"))
-    return dedupe_roots(roots)
-
-
 def env_skill_roots(value: str) -> list[SkillRoot]:
     roots: list[SkillRoot] = []
     for index, item in enumerate(part.strip() for part in value.split(os.pathsep)):

@@ -7,6 +7,7 @@ from skills import SkillDefinition
 
 from .constants import (
     COMPACT_COMMAND,
+    EXIT_PLAN_COMMAND,
     JUMP_COMMAND,
     MEMORY_COMMAND,
     NEW_COMMAND,
@@ -18,6 +19,7 @@ from .constants import (
     SKILL_COMMAND,
     SKILLS_COMMAND,
     TREE_COMMAND,
+    TOKENS_COMMAND,
 )
 
 
@@ -30,6 +32,15 @@ def parse_plan_command(user_input: str) -> str | None:
         return ""
     if stripped.startswith(f"{PLAN_COMMAND} "):
         return stripped[len(PLAN_COMMAND):].strip()
+    return None
+
+
+def parse_exit_plan_command(user_input: str) -> str | None:
+    stripped = user_input.strip()
+    if stripped == EXIT_PLAN_COMMAND:
+        return ""
+    if stripped.startswith(f"{EXIT_PLAN_COMMAND} "):
+        return stripped[len(EXIT_PLAN_COMMAND):].strip()
     return None
 
 
@@ -91,6 +102,10 @@ def parse_new_command(user_input: str) -> bool:
     return user_input.strip() == NEW_COMMAND
 
 
+def parse_tokens_command(user_input: str) -> bool:
+    return user_input.strip() == TOKENS_COMMAND
+
+
 def parse_tree_command(user_input: str) -> bool:
     return user_input.strip() == TREE_COMMAND
 
@@ -131,6 +146,24 @@ def format_memory_status(memory: TextLongTermMemory) -> str:
     ])
 
 
+def format_token_usage(session: SessionManager) -> str:
+    usage = session.token_usage()
+    hit_rate = (
+        usage.cached_input_tokens / usage.input_tokens * 100
+        if usage.input_tokens > 0
+        else 0
+    )
+    return "\n".join([
+        "当前会话 token 用量:",
+        f"  输入（命中缓存）: {_format_int(usage.cached_input_tokens)}",
+        f"  输入（未命中缓存）: {_format_int(usage.uncached_input_tokens)}",
+        f"  输入合计        : {_format_int(usage.input_tokens)}",
+        f"  输出            : {_format_int(usage.output_tokens)}",
+        f"  总量            : {_format_int(usage.total_tokens)}",
+        f"  输入缓存命中率  : {hit_rate:.1f}%",
+    ])
+
+
 def _split_remember_type(payload: str) -> tuple[str | None, str]:
     head, separator, tail = payload.strip().partition(" ")
     memory_type = head.rstrip(":").lower()
@@ -160,7 +193,7 @@ def format_plugin_list(plugins: Sequence[LoadedPlugin], diagnostics: Sequence[Pl
     lines = [f"插件（{len(plugins)} 个）:"]
     for plugin in plugins:
         state = "enabled" if plugin.enabled else "disabled"
-        skill_count = len(plugin.skill_roots)
+        skill_count = len(plugin.contributions.skill_roots)
         description = f": {plugin.manifest.description}" if plugin.manifest.description else ""
         lines.append(f"  - {plugin.manifest.id} [{state}] skills={skill_count}{description}")
     if diagnostics:
@@ -233,3 +266,7 @@ def entry_preview(entry) -> str:
     if len(compact) <= TREE_PREVIEW_CHARS:
         return compact
     return compact[:TREE_PREVIEW_CHARS] + "..."
+
+
+def _format_int(value: int) -> str:
+    return f"{value:,}"

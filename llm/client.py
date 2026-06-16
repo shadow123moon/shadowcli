@@ -7,6 +7,7 @@ from pydantic.dataclasses import dataclass
 import requests
 
 from llm.types import ChatResponse, FunctionCall, Message, ToolCall
+from llm.usage import normalize_usage
 
 
 @dataclass
@@ -56,9 +57,9 @@ def chat(
     if not api_url.endswith("/chat/completions"):
         api_url = api_url.rstrip("/") + "/chat/completions"
 
-    body = {"model": model, "messages": [_message_to_dict(m) for m in messages]}
+    body = _sanitize_for_json({"model": model, "messages": [_message_to_dict(m) for m in messages]})
     if tools:
-        body["tools"] = tools
+        body["tools"] = _sanitize_for_json(tools)
         body["parallel_tool_calls"] = False
 
     headers = {
@@ -106,13 +107,13 @@ def chat_stream(
         base_url=api_url,
         default_headers=extra_headers or {},
     )
-    create_kwargs = {
+    create_kwargs = _sanitize_for_json({
         "model": model,
         "messages": [_message_to_dict(m) for m in messages],
         "tools": tools,
         "stream": True,
         "stream_options": {"include_usage": True},
-    }
+    })
     if tools:
         create_kwargs["parallel_tool_calls"] = False
 
@@ -223,10 +224,26 @@ def _message_to_dict(message: Message) -> dict:
     return node
 
 
+def _sanitize_for_json(value):
+    if isinstance(value, str):
+        return "".join("�" if 0xD800 <= ord(char) <= 0xDFFF else char for char in value)
+    if isinstance(value, list):
+        return [_sanitize_for_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_for_json(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _sanitize_for_json(key): _sanitize_for_json(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _parse_response(data: dict) -> ChatResponse:
     choice = data["choices"][0]
     msg = choice.get("message", {})
     usage = data.get("usage", {})
+    normalized_usage = normalize_usage(usage)
 
     tool_calls = None
     if msg.get("tool_calls") is not None:
@@ -244,9 +261,10 @@ def _parse_response(data: dict) -> ChatResponse:
     return ChatResponse(
         content=msg.get("content"),
         tool_calls=tool_calls,
-        prompt_tokens=usage.get("prompt_tokens", 0),
-        completion_tokens=usage.get("completion_tokens", 0),
-        total_tokens=usage.get("total_tokens", 0),
+        prompt_tokens=normalized_usage.input_tokens,
+        cached_prompt_tokens=normalized_usage.cached_input_tokens,
+        completion_tokens=normalized_usage.output_tokens,
+        total_tokens=normalized_usage.total_tokens,
     )
 if __name__ == "__main__":
     from llm.types import Message

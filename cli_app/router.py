@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
 from memory import MemoryProposal, ProposeMemoryTool
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
+from sessions.plan_mode import PlanModeState, format_plan_mode_status
 from sessions.types import DEFAULT_SESSION_TITLE
 from skills import (
     SkillContextBuilder,
@@ -21,8 +22,10 @@ from .commands import (
     format_memory_status,
     format_plugin_list,
     format_skill_list,
+    format_token_usage,
     handle_remember,
     parse_compact_command,
+    parse_exit_plan_command,
     parse_jump_command,
     parse_new_command,
     parse_plan_command,
@@ -32,6 +35,7 @@ from .commands import (
     parse_resume_command,
     parse_skill_command,
     parse_skills_command,
+    parse_tokens_command,
     parse_tree_command,
 )
 from .constants import HELP, MEMORY_COMMAND
@@ -132,6 +136,12 @@ class ReplRouter:
         if line == MEMORY_COMMAND:
             self.renderer.message(format_memory_status(self.long_term))
             return True
+        if parse_tokens_command(line):
+            if not self.ensure_existing_session() or self.session is None:
+                self.renderer.message(_no_active_session_message())
+                return True
+            self.renderer.message(format_token_usage(self.session))
+            return True
         if parse_new_command(line):
             self.start_new_session()
             return True
@@ -145,6 +155,11 @@ class ReplRouter:
             return True
         if parse_compact_command(line) is not None:
             self._handle_compact()
+            return True
+
+        exit_plan_input = parse_exit_plan_command(line)
+        if exit_plan_input is not None:
+            self._handle_exit_plan(exit_plan_input)
             return True
 
         jump_target = parse_jump_command(line)
@@ -168,6 +183,7 @@ class ReplRouter:
 
     def attach_session(self, next_session: SessionManager) -> None:
         self.session = next_session
+        self.app_runtime.plan_mode_state = PlanModeState.from_dict(next_session.meta.plan_mode)
         self.agent = self.app_runtime.build_agent(
             conversation_messages=self.session.messages(),
             on_message_appended=self.session.append_message,
@@ -205,6 +221,7 @@ class ReplRouter:
     def start_new_session(self) -> None:
         self.attach_session(self.session_store.create(self.cwd))
         assert self.session is not None
+        self._persist_plan_mode()
         self.renderer.message(f"已开启新对话: {self.session.meta.session_id}")
 
     def _handle_resume(self, resume_target: str) -> None:
@@ -255,12 +272,41 @@ class ReplRouter:
 
     def _handle_plan(self, line: str, plan_input: str) -> None:
         if not plan_input:
-            self.renderer.message("用法: /plan <任务>")
+            self.renderer.message(format_plan_mode_status(self._plan_mode()))
             return
-        self._run_agent_line(line, allow_auto_skill=False)
+        active_session, active_agent, context_builder = self.ensure_session()
+        self.app_runtime.plan_mode_state.enter(plan_input)
+        self._persist_plan_mode()
+        self.runtime_context_builder = self._prepare_agent_run(
+            active_session,
+            active_agent,
+            context_builder,
+        )
+        self.renderer.message(f"已进入 plan mode: {plan_input}")
+        self._run_agent_line(
+            "进入计划模式，先探索代码并提出计划，不要修改文件。",
+            allow_auto_skill=False,
+        )
+
+    def _handle_exit_plan(self, plan_input: str) -> None:
+        state = self._plan_mode()
+        if not state.active:
+            self.renderer.message("当前未处于 plan mode。")
+            return
+        if not plan_input:
+            self.renderer.message("用法: /exit-plan <已批准的计划内容>")
+            return
+        state.exit(plan_input)
+        self._persist_plan_mode()
+        self.runtime_context_builder = (
+            self.app_runtime.session_runtime.build_context(self.session)
+            if self.session is not None
+            else None
+        )
+        self.renderer.message("已退出 plan mode，计划已记录。")
 
     def _handle_plugins(self) -> None:
-        plugins, diagnostics = self.app_runtime.skill_manager.plugin_status()
+        plugins, diagnostics = self.app_runtime.plugin_status()
         self.renderer.message(format_plugin_list(plugins, diagnostics))
 
     def _handle_plugin(self, action: str, name: str) -> None:
@@ -268,7 +314,7 @@ class ReplRouter:
             self.renderer.message("用法: /plugin enable|disable <name>")
             return
 
-        if not self.app_runtime.skill_manager.set_plugin_enabled(name, action == "enable"):
+        if not self.app_runtime.set_plugin_enabled(name, action == "enable"):
             self.renderer.message(f"未找到插件: {name}")
             return
 
@@ -320,6 +366,8 @@ class ReplRouter:
         *,
         allow_auto_skill: bool = True,
     ) -> None:
+        if self._plan_mode().active:
+            allow_auto_skill = False
         selection = self._select_auto_skill(line) if allow_auto_skill else None
         if self.run_interactive_in_worker:
             active_session, context_builder = self.ensure_worker_session()
@@ -354,6 +402,17 @@ class ReplRouter:
                 runtime_context_builder=run_context_builder,
                 renderer=self.renderer,
             )
+
+    def _plan_mode(self) -> PlanModeState:
+        state = self.app_runtime.plan_mode_state
+        if state is None:
+            state = PlanModeState()
+            self.app_runtime.plan_mode_state = state
+        return state
+
+    def _persist_plan_mode(self) -> None:
+        if self.session is not None:
+            self.session.update_plan_mode(self._plan_mode().to_dict())
 
     def cancel_current(self, reason: str = "user_cancelled") -> bool:
         return self.app_runtime.task_runtime.cancel_current(reason=reason)
