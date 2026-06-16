@@ -11,6 +11,7 @@ from sessions.plan_mode import (
     format_plan_mode_status,
     plan_mode_context,
 )
+from sessions.plan_tools import ExitPlanModeTool, PlanProposal
 from sessions import RuntimeContextBuilder, SessionManager, SessionStore
 from app_runtime.plan_guard import register_plan_mode_guard
 from tooling import ReadTool, WriteTool, EditTool, ToolRegistry, ToolRuntime
@@ -325,6 +326,88 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
 
             self.assertNotIn("## 当前模式: Plan Mode", context)
             self.assertNotIn("## 已批准计划", context)
+
+
+class TestExitPlanModeTool(unittest.TestCase):
+    """Test ExitPlanModeTool for agent-driven plan mode exit."""
+
+    def test_tool_requires_plan_parameter(self):
+        """Test tool rejects empty plan."""
+        confirmed = False
+        approved_plan = None
+
+        def mock_confirm(proposal):
+            nonlocal confirmed
+            confirmed = True
+            return True
+
+        def mock_on_approved(plan):
+            nonlocal approved_plan
+            approved_plan = plan
+
+        tool = ExitPlanModeTool(confirm_plan=mock_confirm, on_plan_approved=mock_on_approved)
+        result = tool.execute({"plan": ""})
+
+        self.assertIn("错误", result)
+        self.assertFalse(confirmed)
+        self.assertIsNone(approved_plan)
+
+    def test_tool_executes_on_user_confirmation(self):
+        """Test tool exits plan mode when user confirms."""
+        confirmed_proposal = None
+        approved_plan = None
+
+        def mock_confirm(proposal):
+            nonlocal confirmed_proposal
+            confirmed_proposal = proposal
+            return True
+
+        def mock_on_approved(plan):
+            nonlocal approved_plan
+            approved_plan = plan
+
+        tool = ExitPlanModeTool(confirm_plan=mock_confirm, on_plan_approved=mock_on_approved)
+        test_plan = "1. 步骤一\n2. 步骤二\n3. 步骤三"
+        result = tool.execute({"plan": test_plan, "reason": "计划完成"})
+
+        self.assertIsNotNone(confirmed_proposal)
+        self.assertEqual(confirmed_proposal.plan, test_plan)
+        self.assertEqual(confirmed_proposal.reason, "计划完成")
+        self.assertEqual(approved_plan, test_plan)
+        self.assertIn("✓", result)
+        self.assertIn("已退出 plan mode", result)
+
+    def test_tool_cancels_on_user_rejection(self):
+        """Test tool stays in plan mode when user rejects."""
+        approved_plan = None
+
+        def mock_confirm(proposal):
+            return False  # User rejects
+
+        def mock_on_approved(plan):
+            nonlocal approved_plan
+            approved_plan = plan
+
+        tool = ExitPlanModeTool(confirm_plan=mock_confirm, on_plan_approved=mock_on_approved)
+        test_plan = "incomplete plan"
+        result = tool.execute({"plan": test_plan})
+
+        self.assertIsNone(approved_plan)
+        self.assertIn("未确认", result)
+        self.assertIn("仍处于 plan mode", result)
+
+    def test_tool_metadata(self):
+        """Test tool has correct metadata."""
+        tool = ExitPlanModeTool(
+            confirm_plan=lambda p: True,
+            on_plan_approved=lambda p: None,
+        )
+
+        self.assertEqual(tool.name, "exit_plan_mode")
+        self.assertEqual(tool.effect, "write")
+        self.assertEqual(tool.category, "plan")
+        self.assertTrue(tool.approval_required)
+        self.assertIn("plan", tool.description)
 
 
 if __name__ == "__main__":

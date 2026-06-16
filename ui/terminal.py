@@ -441,3 +441,26 @@ def ask_memory_confirmation(suggestion, out: TextIO | None = None) -> bool:
         _write(f"原因: {reason}", out)
     choice = input("保存吗？[y/N]: ").strip().lower()
     return choice in {"y", "yes"}
+
+
+def ask_plan_confirmation(proposal, out: TextIO | None = None) -> bool:
+    """Ask user to confirm a plan proposal.
+
+    Args:
+        proposal: PlanProposal with plan text and optional reason
+        out: Output stream (default: sys.stdout)
+
+    Returns:
+        True if user confirms, False otherwise
+    """
+    _write("", out)
+    _write("🎯 模型提出退出 plan mode 并提交计划:", out)
+    _write("", out)
+    _write(str(proposal.plan), out)
+    _write("", out)
+    reason = str(getattr(proposal, "reason", "") or "").strip()
+    if reason:
+        _write(f"原因: {reason}", out)
+        _write("", out)
+    choice = input("批准计划并退出 plan mode？[y/N]: ").strip().lower()
+    return choice in {"y", "yes"}

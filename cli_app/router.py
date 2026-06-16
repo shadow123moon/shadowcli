@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
 from memory import MemoryProposal, ProposeMemoryTool
-from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
+from sessions import ExitPlanModeTool, NavigationPlan, PlanProposal, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.plan_mode import PlanModeState, format_plan_mode_status
 from sessions.types import DEFAULT_SESSION_TITLE
 from skills import (
@@ -84,6 +84,7 @@ class ReplRouter:
         renderer: Renderer,
         skill_selector: SkillSelector | None = None,
         confirm_memory: Callable[[MemoryProposal], bool] = ask_memory_confirmation,
+        confirm_plan: Callable[[PlanProposal], bool] | None = None,
         run_interactive_in_worker: bool = False,
     ) -> None:
         self.app_runtime = app_runtime
@@ -94,8 +95,14 @@ class ReplRouter:
         self.renderer = renderer
         self.skill_selector = skill_selector
         self.confirm_memory = confirm_memory
+        self.confirm_plan = confirm_plan or self._default_confirm_plan
         self.run_interactive_in_worker = run_interactive_in_worker
         _register_propose_memory_tool(self.runtime, self.long_term, confirm_memory=self.confirm_memory)
+        _register_exit_plan_mode_tool(
+            self.runtime,
+            confirm_plan=self.confirm_plan,
+            on_plan_approved=self._on_plan_approved,
+        )
 
         self.session: SessionManager | None = None
         self.agent: ReactAgent | None = None
@@ -414,6 +421,23 @@ class ReplRouter:
         if self.session is not None:
             self.session.update_plan_mode(self._plan_mode().to_dict())
 
+    def _default_confirm_plan(self, proposal: PlanProposal) -> bool:
+        """Default plan confirmation handler."""
+        from ui import ask_plan_confirmation
+        return ask_plan_confirmation(proposal)
+
+    def _on_plan_approved(self, plan: str) -> None:
+        """Callback when plan is approved via exit_plan_mode tool."""
+        state = self._plan_mode()
+        if not state.active:
+            # Already exited or not in plan mode
+            return
+        state.exit(plan)
+        self._persist_plan_mode()
+        # Rebuild context for next turn
+        if self.session is not None:
+            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
+
     def cancel_current(self, reason: str = "user_cancelled") -> bool:
         return self.app_runtime.task_runtime.cancel_current(reason=reason)
 
@@ -718,3 +742,17 @@ def _register_propose_memory_tool(runtime: Any, long_term: Any, *, confirm_memor
     if register is None:
         return
     register(ProposeMemoryTool(long_term, confirm_memory=confirm_memory))
+
+
+def _register_exit_plan_mode_tool(
+    runtime: Any,
+    *,
+    confirm_plan: Callable[[PlanProposal], bool],
+    on_plan_approved: Callable[[str], None],
+) -> None:
+    """注册 exit_plan_mode 工具到运行时。"""
+    registry = getattr(runtime, "registry", None)
+    register = getattr(registry, "register", None)
+    if register is None:
+        return
+    register(ExitPlanModeTool(confirm_plan=confirm_plan, on_plan_approved=on_plan_approved))
