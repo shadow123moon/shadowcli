@@ -90,6 +90,28 @@ class _SchemaTool(Tool):
         return "ok"
 
 
+class _PlanOnlyTestTool(Tool):
+    category = "plan"
+    effect = "control"
+    plan_mode = "control"
+    plan_mode_only = True
+
+    @property
+    def name(self) -> str:
+        return "plan_only"
+
+    @property
+    def description(self) -> str:
+        return "plan only test tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    def execute(self, arguments: dict) -> str:
+        return "plan-only-ok"
+
+
 class ModuleLayoutTests(unittest.TestCase):
     def test_legacy_root_modules_are_removed(self):
         root = Path(__file__).resolve().parents[1]
@@ -948,6 +970,36 @@ class ReactAgentTests(unittest.TestCase):
         names = [tool["function"]["name"] for tool in calls[0][1]]
         self.assertIn("bash", names)
         self.assertNotIn("mcp__filesystem__search_files", names)
+
+    def test_default_mode_hides_plan_only_tools(self):
+        calls = []
+        registry = ToolRegistry()
+        registry.register(ReadTool())
+        registry.register(_PlanOnlyTestTool())
+        agent = ReactAgent(registry)
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "默认模式")):
+            agent.run("普通任务")
+
+        names = [tool["function"]["name"] for tool in calls[0][1]]
+        self.assertIn("read", names)
+        self.assertNotIn("plan_only", names)
+
+    def test_plan_mode_exposes_plan_only_tools_and_hides_writes(self):
+        calls = []
+        registry = ToolRegistry()
+        registry.register(ReadTool())
+        registry.register(WriteTool())
+        registry.register(_PlanOnlyTestTool())
+        agent = ReactAgent(registry, plan_mode_active=lambda: True)
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "计划模式")):
+            agent.run("计划任务")
+
+        names = [tool["function"]["name"] for tool in calls[0][1]]
+        self.assertIn("read", names)
+        self.assertIn("plan_only", names)
+        self.assertNotIn("write", names)
 
     def test_react_mcp_task_can_receive_mcp_tools(self):
         calls = []
@@ -3421,6 +3473,8 @@ class PiStyleToolTests(unittest.TestCase):
 
         for name in ["read", "write", "edit", "bash", "ls", "grep", "find", "web_search", "web_fetch"]:
             self.assertIn(name, names)
+        self.assertIn("explore_agent", names)
+        self.assertIn("plan_agent", names)
         for name in ["read_file", "write_file", "list_dir", "execute_command"]:
             self.assertNotIn(name, names)
         for name in ["index_codebase", "search_code"]:

@@ -14,8 +14,10 @@ from plan_mode import (
     plan_mode_context,
     register_plan_mode_guard,
 )
+from plan_mode.agents import ExploreAgentTool, PlanAgentTool
 from plan_mode.state import _normalize_text
 from plan_mode.tools import ExitPlanModeTool, PlanProposal
+from llm.client import StreamEvent
 from sessions import RuntimeContextBuilder, SessionManager, SessionStore
 from tooling import BashTool, ReadTool, WriteTool, EditTool, ToolRegistry, ToolRuntime
 
@@ -272,6 +274,44 @@ class TestPlanModeGuard(unittest.TestCase):
         self.assertIn("exit_plan_mode", names)
         self.assertNotIn("write", names)
         self.assertNotIn("edit", names)
+
+    def test_filters_plan_subagents_visible_in_plan_mode(self):
+        self.registry.register(ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
+        self.registry.register(PlanAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
+
+        definitions = filter_tool_definitions_for_plan_mode(
+            self.runtime.get_all_definitions(),
+            self.runtime,
+        )
+        names = [definition["function"]["name"] for definition in definitions]
+
+        self.assertIn("explore_agent", names)
+        self.assertIn("plan_agent", names)
+
+    def test_plan_subagents_are_blocked_outside_plan_mode(self):
+        self.plan_mode_active = False
+        self.registry.register(ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
+
+        result = self.runtime.execute("explore_agent", {"task": "查结构"})
+
+        self.assertIn("只能在 plan mode 下执行", result)
+
+    def test_explore_agent_runs_with_read_only_tools(self):
+        calls: list[list[str]] = []
+
+        def fake_stream(_messages, tools=None, cancel=None):
+            calls.append([tool["function"]["name"] for tool in tools or []])
+            yield StreamEvent("content", "探索摘要")
+            yield StreamEvent("done", {"reason": "finished"})
+
+        tool = ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=fake_stream)
+
+        result = tool.execute({"task": "查 runtime"})
+
+        self.assertEqual(result, "探索摘要")
+        self.assertIn("read", calls[0])
+        self.assertNotIn("write", calls[0])
+        self.assertNotIn("edit", calls[0])
 
     def test_blocks_write_tool_in_plan_mode(self):
         self.plan_mode_active = True
