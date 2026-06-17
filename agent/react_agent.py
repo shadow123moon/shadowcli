@@ -1,8 +1,7 @@
 from collections.abc import Callable
 
-from llm.client import chat
 from llm.types import Message
-from plan_mode import filter_tool_definitions_for_plan_mode
+from plan_mode import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
 from tooling import ToolRegistry
 
 from .agent_loop import AgentLoop
@@ -13,7 +12,7 @@ class ReactAgent:
     def __init__(
         self,
         tool_registry: ToolRegistry,
-        chat=chat,
+        chat_stream_fn: Callable[..., object] | None = None,
         conversation_messages: list[Message] | None = None,
         on_message_appended: Callable[[Message], None] | None = None,
         plan_mode_active: Callable[[], bool] | None = None,
@@ -27,7 +26,7 @@ class ReactAgent:
                 tool_registry,
                 plan_mode_active=self.plan_mode_active(),
             ),
-            chat=chat,
+            chat=chat_stream_fn,
             tool_registry=tool_registry,
             conversation_history=self.conversation_messages,
             on_message_appended=on_message_appended,
@@ -80,6 +79,8 @@ def _build_react_system_prompt(tool_registry: ToolRegistry, *, plan_mode_active:
     defs = filter_tool_definitions_for_model(tool_registry.get_all_definitions())
     if plan_mode_active:
         defs = filter_tool_definitions_for_plan_mode(defs, tool_registry)
+    else:
+        defs = filter_tool_definitions_for_default_mode(defs, tool_registry)
     tools_desc = "\n".join(
         f"- {d['function']['name']}: {d['function']['description']}" for d in defs
     )

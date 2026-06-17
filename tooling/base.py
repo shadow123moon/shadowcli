@@ -6,6 +6,7 @@ class Tool(ABC):
     category: str = "general"
     effect: str = "write"
     plan_mode: str | None = None
+    plan_mode_only: bool = False
     concurrency_safe: bool = False
     result_kind: str = "text"
     guidance: str = ""

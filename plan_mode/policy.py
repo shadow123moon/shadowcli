@@ -86,6 +86,18 @@ def filter_tool_definitions_for_plan_mode(definitions: list[dict], registry: Any
     return filtered
 
 
+def filter_tool_definitions_for_default_mode(definitions: list[dict], registry: Any) -> list[dict]:
+    filtered: list[dict] = []
+    for definition in definitions:
+        name = _definition_name(definition)
+        if not name:
+            continue
+        tool = _get_tool(registry, name)
+        if tool is None or not getattr(tool, "plan_mode_only", False):
+            filtered.append(definition)
+    return filtered
+
+
 def is_read_only_shell_command(command: str) -> tuple[bool, str]:
     stripped = command.strip()
     if not stripped:

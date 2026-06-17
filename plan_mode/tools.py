@@ -19,6 +19,7 @@ class ExitPlanModeTool(Tool):
     category = "plan"
     effect = "control"
     plan_mode = "control"
+    plan_mode_only = True
     concurrency_safe = False
     result_kind = "text"
     guidance = (

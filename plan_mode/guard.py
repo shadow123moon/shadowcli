@@ -18,6 +18,12 @@ def register_plan_mode_guard(runtime: Any, is_plan_mode_active: PlanModeActive) 
 
     def plan_mode_hook(name: str, arguments: dict, tool: Any) -> dict[str, Any] | None:
         if not is_plan_mode_active():
+            if getattr(tool, "plan_mode_only", False):
+                return {
+                    "block": True,
+                    "hard_stop": False,
+                    "reason": f"{name} 只能在 plan mode 下执行。请先使用 /plan <任务> 进入计划模式。",
+                }
             return None
 
         allowed, reason = is_plan_mode_tool_allowed(name, arguments, tool)

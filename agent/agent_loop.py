@@ -10,7 +10,7 @@ from typing import Callable
 
 from llm import FunctionCall, Message, ToolCall, chat_stream
 from llm.usage import normalize_usage, usage_to_metadata
-from plan_mode import filter_tool_definitions_for_plan_mode
+from plan_mode import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
 from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
@@ -31,7 +31,7 @@ TOOL_ERROR_PREFIXES = (
 )
 MAX_PARALLEL_TOOL_CALLS = 8
 
-ChatFn = Callable[..., object]
+ChatStreamFn = Callable[..., object]
 MessageSink = Callable[[Message], None]
 
 
@@ -54,7 +54,7 @@ class AgentLoop:
         self,
         name: str,
         system_prompt: str,
-        chat: ChatFn,
+        chat: ChatStreamFn | None,
         tool_registry,
         *,
         cancel: threading.Event | None = None,
@@ -66,7 +66,7 @@ class AgentLoop:
         plan_mode_active: Callable[[], bool] | None = None,
     ):
         self.name = name
-        self.chat = chat
+        self.chat_stream_fn = chat
         self.tool_registry = tool_registry
         self.cancel = cancel or threading.Event()
         self.journal = journal
@@ -98,6 +98,8 @@ class AgentLoop:
                 definitions = self.tool_registry.get_all_definitions()
                 if self.plan_mode_active():
                     definitions = filter_tool_definitions_for_plan_mode(definitions, self.tool_registry)
+                else:
+                    definitions = filter_tool_definitions_for_default_mode(definitions, self.tool_registry)
                 tools_schema = filter_tool_definitions_for_model(definitions, task.content)
                 if not tools_schema:
                     tools_schema = None
@@ -107,7 +109,8 @@ class AgentLoop:
             usage_data: dict | None = None
 
             try:
-                for event in chat_stream(
+                stream_fn = self.chat_stream_fn or chat_stream
+                for event in stream_fn(
                     self._messages_for_model(),
                     tools=tools_schema,
                     cancel=self.cancel,

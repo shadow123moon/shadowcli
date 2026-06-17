@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from agent import ReactAgent
-from llm import Message, chat as default_chat
+from llm import Message, chat as default_chat, chat_stream as default_chat_stream
 from memory import DEFAULT_LONG_TERM_NAME, TextLongTermMemory
 from mcp_integration import McpServerManager, McpToolWrapper, load_mcp_config
 from plan_mode import PlanModeState, register_plan_mode_guard
+from plan_mode.agents import ExploreAgentTool, PlanAgentTool
 from plugin_runtime import PluginManager
 from sessions import NavigationPlan, SessionStore
 from sessions.summarizer import generate_branch_summary
@@ -52,6 +53,7 @@ class AppRuntime:
     skill_manager: SkillManager
     task_runtime: TaskRuntime
     chat_fn: ChatFn
+    chat_stream_fn: ChatFn
     mcp_manager: McpServerManager | None = None
     plan_mode_state: PlanModeState | None = None
 
@@ -66,6 +68,7 @@ class AppRuntime:
         long_term_builder: LongTermBuilder | None = None,
         event_bus: EventBus | None = None,
         chat_fn: ChatFn | None = None,
+        chat_stream_fn: ChatFn | None = None,
         mcp_manager: McpServerManager | None = None,
     ) -> "AppRuntime":
         """Build the runtime container without starting external MCP servers."""
@@ -109,10 +112,17 @@ class AppRuntime:
             skill_manager=skill_manager,
             task_runtime=task_runtime,
             chat_fn=chat_fn or default_chat,
+            chat_stream_fn=chat_stream_fn or default_chat_stream,
             mcp_manager=mcp_manager,
             plan_mode_state=plan_state,
         )
         register_plan_mode_guard(runtime.tool_runtime, lambda: runtime.plan_mode_state.active if runtime.plan_mode_state else False)
+        runtime.tool_runtime.registry.register(
+            ExploreAgentTool(parent_runtime=runtime.tool_runtime, chat_stream_fn=runtime.chat_stream)
+        )
+        runtime.tool_runtime.registry.register(
+            PlanAgentTool(parent_runtime=runtime.tool_runtime, chat_stream_fn=runtime.chat_stream)
+        )
         runtime.event_bus.publish("runtime.created", cwd=project_cwd)
         return runtime
 
@@ -125,7 +135,7 @@ class AppRuntime:
         """Create a ReAct agent bound to this runtime's tool runtime and chat entrypoint."""
         return ReactAgent(
             self.tool_runtime,
-            chat=self.chat,
+            chat_stream_fn=self.chat_stream,
             conversation_messages=conversation_messages,
             on_message_appended=on_message_appended,
             plan_mode_active=lambda: self.plan_mode_state.active if self.plan_mode_state else False,
@@ -142,6 +152,10 @@ class AppRuntime:
     def chat(self, *args: Any, **kwargs: Any) -> Any:
         """Call the configured LLM function through the runtime entrypoint."""
         return self.chat_fn(*args, **kwargs)
+
+    def chat_stream(self, *args: Any, **kwargs: Any) -> Any:
+        """Stream the configured LLM function through the runtime entrypoint."""
+        return self.chat_stream_fn(*args, **kwargs)
 
     def build_branch_summary(self, plan: NavigationPlan) -> str:
         """Summarize the branch that will be left during session navigation."""
