@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 from llm.client import chat
 from llm.types import Message
+from plan_mode import filter_tool_definitions_for_plan_mode
 from tooling import ToolRegistry
 
 from .agent_loop import AgentLoop
@@ -15,18 +16,30 @@ class ReactAgent:
         chat=chat,
         conversation_messages: list[Message] | None = None,
         on_message_appended: Callable[[Message], None] | None = None,
+        plan_mode_active: Callable[[], bool] | None = None,
     ):
+        self.tool_registry = tool_registry
+        self.plan_mode_active = plan_mode_active or (lambda: False)
         self.conversation_messages = conversation_messages if conversation_messages is not None else []
         self.reactr = AgentLoop(
             name="react",
-            system_prompt=_build_react_system_prompt(tool_registry),
+            system_prompt=_build_react_system_prompt(
+                tool_registry,
+                plan_mode_active=self.plan_mode_active(),
+            ),
             chat=chat,
             tool_registry=tool_registry,
             conversation_history=self.conversation_messages,
             on_message_appended=on_message_appended,
+            plan_mode_active=self.plan_mode_active,
         )
 
     def events(self, user_input: str, context: str = "", *, cancel=None, journal=None, turn_id: str | None = None):
+        self.reactr._system_prompt = _build_react_system_prompt(
+            self.tool_registry,
+            plan_mode_active=self.plan_mode_active(),
+        )
+        self.reactr._reset_system_prompt()
         # 重置取消标志（每次新请求都要清除）
         if cancel is not None:
             self.reactr.cancel = cancel
@@ -63,8 +76,10 @@ class ReactAgent:
         self.reactr._reset_system_prompt()
 
 
-def _build_react_system_prompt(tool_registry: ToolRegistry) -> str:
+def _build_react_system_prompt(tool_registry: ToolRegistry, *, plan_mode_active: bool = False) -> str:
     defs = filter_tool_definitions_for_model(tool_registry.get_all_definitions())
+    if plan_mode_active:
+        defs = filter_tool_definitions_for_plan_mode(defs, tool_registry)
     tools_desc = "\n".join(
         f"- {d['function']['name']}: {d['function']['description']}" for d in defs
     )
@@ -78,11 +93,27 @@ def _build_tool_guidance(tool_registry: ToolRegistry, definitions: list[dict]) -
         name = str(definition.get("function", {}).get("name", ""))
         if not name:
             continue
-        try:
-            tool = tool_registry.get(name)
-        except (AttributeError, KeyError):
+        tool = _get_tool(tool_registry, name)
+        if tool is None:
             continue
         guidance = str(getattr(tool, "guidance", "")).strip()
         if guidance:
             lines.append(f"- {name}: {guidance}")
     return "\n".join(lines)
+
+
+def _get_tool(tool_registry, name: str):
+    get = getattr(tool_registry, "get", None)
+    if callable(get):
+        try:
+            return get(name)
+        except KeyError:
+            return None
+    registry = getattr(tool_registry, "registry", None)
+    get = getattr(registry, "get", None)
+    if callable(get):
+        try:
+            return get(name)
+        except KeyError:
+            return None
+    return None

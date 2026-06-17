@@ -10,16 +10,15 @@ from agent import ReactAgent
 from llm import Message, chat as default_chat
 from memory import DEFAULT_LONG_TERM_NAME, TextLongTermMemory
 from mcp_integration import McpServerManager, McpToolWrapper, load_mcp_config
+from plan_mode import PlanModeState, register_plan_mode_guard
 from plugin_runtime import PluginManager
 from sessions import NavigationPlan, SessionStore
-from sessions.plan_mode import PlanModeState
 from sessions.summarizer import generate_branch_summary
 from tooling.defaults import build_default_tool_runtime, format_tool_list
 
 from .agent_execution import run_agent_once as default_run_agent_once
 from .events import EventBus
 from .hooks import HookManager
-from .plan_guard import register_plan_mode_guard
 from .session import PreparedAgentRun, SessionRuntime
 from .skills import SkillManager, build_skill_roots
 from .state import AppStateStore
@@ -129,6 +128,7 @@ class AppRuntime:
             chat=self.chat,
             conversation_messages=conversation_messages,
             on_message_appended=on_message_appended,
+            plan_mode_active=lambda: self.plan_mode_state.active if self.plan_mode_state else False,
         )
 
     def run_agent_once(self, agent: ReactAgent, user_input: str, **kwargs: Any) -> str:

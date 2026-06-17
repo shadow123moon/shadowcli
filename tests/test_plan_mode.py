@@ -4,17 +4,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from sessions.plan_mode import (
+from plan_mode import (
     DEFAULT_MODE,
     PLAN_MODE,
     PlanModeState,
+    filter_tool_definitions_for_plan_mode,
     format_plan_mode_status,
+    is_read_only_shell_command,
     plan_mode_context,
+    register_plan_mode_guard,
 )
-from sessions.plan_tools import ExitPlanModeTool, PlanProposal
+from plan_mode.state import _normalize_text
+from plan_mode.tools import ExitPlanModeTool, PlanProposal
 from sessions import RuntimeContextBuilder, SessionManager, SessionStore
-from app_runtime.plan_guard import register_plan_mode_guard
-from tooling import ReadTool, WriteTool, EditTool, ToolRegistry, ToolRuntime
+from tooling import BashTool, ReadTool, WriteTool, EditTool, ToolRegistry, ToolRuntime
 
 
 class TestPlanModeState(unittest.TestCase):
@@ -138,7 +141,8 @@ class TestPlanModeContext(unittest.TestCase):
         self.assertIn("任务: 设计 API", context)
         self.assertIn("只读计划模式", context)
         self.assertIn("read/ls/grep/find/web", context)
-        self.assertIn("write/edit/bash", context)
+        self.assertIn("git status/git diff", context)
+        self.assertIn("write/edit/propose_memory", context)
 
     def test_approved_plan_returns_plan_content(self):
         state = PlanModeState()
@@ -192,7 +196,6 @@ class TestPlanModeGuard(unittest.TestCase):
 
     def test_normalize_text_rejects_non_string(self):
         """Test _normalize_text raises TypeError for non-string input."""
-        from sessions.plan_mode import _normalize_text
         with self.assertRaises(TypeError):
             _normalize_text(123)
         with self.assertRaises(TypeError):
@@ -209,6 +212,66 @@ class TestPlanModeGuard(unittest.TestCase):
             # ReadTool 会因为文件不存在而失败，但不会被 plan guard 拦截
             # 关键是不应该出现 "plan mode 只允许只读工具" 的拦截消息
             self.assertNotIn("plan mode 只允许只读工具", result)
+
+    def test_allows_exit_plan_mode_tool_in_plan_mode(self):
+        self.plan_mode_active = True
+        approved: list[str] = []
+        self.registry.register(
+            ExitPlanModeTool(
+                confirm_plan=lambda proposal: True,
+                on_plan_approved=approved.append,
+            )
+        )
+
+        result = self.runtime.execute("exit_plan_mode", {"plan": "1. inspect\n2. implement"})
+
+        self.assertIn("已退出 plan mode", result)
+        self.assertEqual(approved, ["1. inspect\n2. implement"])
+        self.assertNotIn("plan mode 只允许只读工具", result)
+
+    def test_allows_read_only_git_shell_in_plan_mode(self):
+        self.plan_mode_active = True
+        self.registry.register(BashTool())
+
+        result = self.runtime.execute("bash", {"command": "git status --short"})
+
+        self.assertNotIn("plan mode 只允许", result)
+
+    def test_blocks_effectful_shell_in_plan_mode(self):
+        self.plan_mode_active = True
+        self.registry.register(BashTool())
+
+        result = self.runtime.execute("bash", {"command": "New-Item touched.txt"})
+
+        self.assertIn("plan mode 只允许只读 shell 命令", result)
+        self.assertIn("已拒绝 bash", result)
+
+    def test_read_only_shell_policy(self):
+        self.assertEqual(is_read_only_shell_command("git status --short")[0], True)
+        self.assertEqual(is_read_only_shell_command("git diff -- src/app.py")[0], True)
+        self.assertEqual(is_read_only_shell_command("git diff --output=x.patch")[0], False)
+        self.assertEqual(is_read_only_shell_command("git status; New-Item x")[0], False)
+
+    def test_filters_visible_tools_for_plan_mode(self):
+        self.registry.register(BashTool())
+        self.registry.register(
+            ExitPlanModeTool(
+                confirm_plan=lambda proposal: True,
+                on_plan_approved=lambda plan: None,
+            )
+        )
+
+        definitions = filter_tool_definitions_for_plan_mode(
+            self.runtime.get_all_definitions(),
+            self.runtime,
+        )
+        names = [definition["function"]["name"] for definition in definitions]
+
+        self.assertIn("read", names)
+        self.assertIn("bash", names)
+        self.assertIn("exit_plan_mode", names)
+        self.assertNotIn("write", names)
+        self.assertNotIn("edit", names)
 
     def test_blocks_write_tool_in_plan_mode(self):
         self.plan_mode_active = True
@@ -404,7 +467,7 @@ class TestExitPlanModeTool(unittest.TestCase):
         )
 
         self.assertEqual(tool.name, "exit_plan_mode")
-        self.assertEqual(tool.effect, "write")
+        self.assertEqual(tool.effect, "control")
         self.assertEqual(tool.category, "plan")
         self.assertTrue(tool.approval_required)
         self.assertIn("plan", tool.description)

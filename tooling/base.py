@@ -5,6 +5,7 @@ from typing import Dict
 class Tool(ABC):
     category: str = "general"
     effect: str = "write"
+    plan_mode: str | None = None
     concurrency_safe: bool = False
     result_kind: str = "text"
     guidance: str = ""

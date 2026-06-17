@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .manager import SessionManager
-from .plan_mode import PlanModeState, plan_mode_context
+from plan_mode import PlanModeState, plan_mode_context
 
 
 class RuntimeContextBuilder:

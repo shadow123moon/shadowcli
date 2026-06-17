@@ -17,6 +17,7 @@ DEFAULT_OUTPUT_QUEUE_SIZE = 128
 class BashTool(Tool):
     category = "shell"
     effect = "execute"
+    plan_mode = "shell"
     concurrency_safe = False
     result_kind = "command_output"
     guidance = (

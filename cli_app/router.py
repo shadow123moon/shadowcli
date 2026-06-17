@@ -6,8 +6,18 @@ from typing import TYPE_CHECKING, Any
 
 from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
 from memory import MemoryProposal, ProposeMemoryTool
-from sessions import ExitPlanModeTool, NavigationPlan, PlanProposal, RuntimeContextBuilder, SessionManager, SessionStore
-from sessions.plan_mode import PlanModeState, format_plan_mode_status
+from plan_mode import (
+    ExitPlanModeTool,
+    PlanModeState,
+    PlanProposal,
+    attach_session_plan_mode,
+    enter_plan_mode,
+    ensure_plan_mode_state,
+    exit_plan_mode,
+    format_plan_mode_status,
+    persist_plan_mode,
+)
+from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
 from skills import (
     SkillContextBuilder,
@@ -190,7 +200,7 @@ class ReplRouter:
 
     def attach_session(self, next_session: SessionManager) -> None:
         self.session = next_session
-        self.app_runtime.plan_mode_state = PlanModeState.from_dict(next_session.meta.plan_mode)
+        attach_session_plan_mode(self.app_runtime, next_session)
         self.agent = self.app_runtime.build_agent(
             conversation_messages=self.session.messages(),
             on_message_appended=self.session.append_message,
@@ -282,8 +292,7 @@ class ReplRouter:
             self.renderer.message(format_plan_mode_status(self._plan_mode()))
             return
         active_session, active_agent, context_builder = self.ensure_session()
-        self.app_runtime.plan_mode_state.enter(plan_input)
-        self._persist_plan_mode()
+        enter_plan_mode(self.app_runtime, active_session, plan_input)
         self.runtime_context_builder = self._prepare_agent_run(
             active_session,
             active_agent,
@@ -291,7 +300,7 @@ class ReplRouter:
         )
         self.renderer.message(f"已进入 plan mode: {plan_input}")
         self._run_agent_line(
-            "进入计划模式，先探索代码并提出计划，不要修改文件。",
+            "单 Agent 计划执行模式：已进入 plan mode，先探索代码并提出计划，不要修改文件。",
             allow_auto_skill=False,
         )
 
@@ -303,8 +312,7 @@ class ReplRouter:
         if not plan_input:
             self.renderer.message("用法: /exit-plan <已批准的计划内容>")
             return
-        state.exit(plan_input)
-        self._persist_plan_mode()
+        exit_plan_mode(self.app_runtime, self.session, plan_input)
         self.runtime_context_builder = (
             self.app_runtime.session_runtime.build_context(self.session)
             if self.session is not None
@@ -411,15 +419,10 @@ class ReplRouter:
             )
 
     def _plan_mode(self) -> PlanModeState:
-        state = self.app_runtime.plan_mode_state
-        if state is None:
-            state = PlanModeState()
-            self.app_runtime.plan_mode_state = state
-        return state
+        return ensure_plan_mode_state(self.app_runtime)
 
     def _persist_plan_mode(self) -> None:
-        if self.session is not None:
-            self.session.update_plan_mode(self._plan_mode().to_dict())
+        persist_plan_mode(self.session, self._plan_mode())
 
     def _default_confirm_plan(self, proposal: PlanProposal) -> bool:
         """Default plan confirmation handler."""
@@ -432,8 +435,7 @@ class ReplRouter:
         if not state.active:
             # Already exited or not in plan mode
             return
-        state.exit(plan)
-        self._persist_plan_mode()
+        exit_plan_mode(self.app_runtime, self.session, plan)
         # Rebuild context for next turn
         if self.session is not None:
             self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)

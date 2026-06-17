@@ -10,6 +10,7 @@ from typing import Callable
 
 from llm import FunctionCall, Message, ToolCall, chat_stream
 from llm.usage import normalize_usage, usage_to_metadata
+from plan_mode import filter_tool_definitions_for_plan_mode
 from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
@@ -62,6 +63,7 @@ class AgentLoop:
         conversation_history: list[Message] | None = None,
         on_message_appended: MessageSink | None = None,
         use_tools: bool = True,
+        plan_mode_active: Callable[[], bool] | None = None,
     ):
         self.name = name
         self.chat = chat
@@ -72,6 +74,7 @@ class AgentLoop:
         self.conversation_history = conversation_history if conversation_history is not None else []
         self.on_message_appended = on_message_appended
         self.use_tools = use_tools
+        self.plan_mode_active = plan_mode_active or (lambda: False)
         self._system_prompt = system_prompt
         self._current_step_label: str | None = None
         self._reset_system_prompt()
@@ -92,10 +95,10 @@ class AgentLoop:
 
             tools_schema = None
             if allow_tools and self.use_tools:
-                tools_schema = filter_tool_definitions_for_model(
-                    self.tool_registry.get_all_definitions(),
-                    task.content,
-                )
+                definitions = self.tool_registry.get_all_definitions()
+                if self.plan_mode_active():
+                    definitions = filter_tool_definitions_for_plan_mode(definitions, self.tool_registry)
+                tools_schema = filter_tool_definitions_for_model(definitions, task.content)
                 if not tools_schema:
                     tools_schema = None
 

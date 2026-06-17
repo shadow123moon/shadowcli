@@ -841,7 +841,7 @@ class AppRuntimeTests(unittest.TestCase):
         self.assertIsInstance(app.state_store, AppStateStore)
         self.assertIsInstance(app.hook_manager, HookManager)
         self.assertIs(app.hook_manager.event_bus, event_bus)
-        self.assertEqual(len(app.tool_runtime.before_execute_hooks), 1)
+        self.assertEqual(len(app.tool_runtime.before_execute_hooks), 2)
         self.assertIsInstance(app.session_runtime, SessionRuntime)
         self.assertIs(app.session_runtime.long_term_memory, long_term)
         self.assertIsInstance(app.skill_manager, SkillManager)
