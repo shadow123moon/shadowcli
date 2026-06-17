@@ -1128,7 +1128,7 @@ class ReactAgentTests(unittest.TestCase):
         self.assertNotIn("session_messages", params)
         self.assertNotIn("message_sink", params)
 
-    def test_react_turn_persists_exact_user_text_sent_to_model(self):
+    def test_react_turn_sends_runtime_context_without_persisting_it(self):
         calls = []
         agent = ReactAgent(CaptureRegistry())
 
@@ -1140,13 +1140,13 @@ class ReactAgentTests(unittest.TestCase):
         self.assertIn("用户偏好：普通输入走 React", prompt)
         self.assertIn("以下上下文只适用于本条消息末尾的“当前任务”", prompt)
         self.assertIn("当前任务：入口和 React 怎么安排？", prompt)
-        self.assertTrue(any(
+        self.assertFalse(any(
             message.role == "user"
             and message.content
             and "## 相关长期记忆" in message.content
             for message in agent.conversation_messages
         ))
-        self.assertFalse(any(
+        self.assertTrue(any(
             message.role == "user"
             and message.content == "入口和 React 怎么安排？"
             for message in agent.conversation_messages
@@ -1191,6 +1191,24 @@ class ReactAgentTests(unittest.TestCase):
 
         self.assertEqual([message.role for message in persisted], ["user", "assistant", "tool", "assistant"])
         self.assertEqual(persisted[2].tool_call_id, "call-read")
+
+    def test_on_message_appended_receives_clean_user_text_with_runtime_context(self):
+        calls = []
+        persisted = []
+        agent = ReactAgent(CaptureRegistry(), on_message_appended=persisted.append)
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "收到")):
+            agent.run("继续", context="## 分支摘要\n旧分支已经总结")
+
+        self.assertIn("## 分支摘要", calls[0][0][-1].content)
+        self.assertEqual(persisted[0].role, "user")
+        self.assertEqual(persisted[0].content, "继续")
+        self.assertFalse(any(
+            message.role == "user"
+            and message.content
+            and "## 分支摘要" in message.content
+            for message in persisted
+        ))
 
 
 class RuntimeContextBuilderTests(unittest.TestCase):

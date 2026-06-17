@@ -77,19 +77,24 @@ class AgentLoop:
         self.plan_mode_active = plan_mode_active or (lambda: False)
         self._system_prompt = system_prompt
         self._current_step_label: str | None = None
+        self._ephemeral_context_index: int | None = None
+        self._ephemeral_context: str = ""
         self._reset_system_prompt()
 
     def execute(self, task: Message, context: str = "", allow_tools: bool = True):
         """Execute one task and yield StreamEvent objects."""
         from llm.client import StreamEvent
 
-        self._append_message(Message(role="user", content=_compose_task_content(task.content, context)))
+        self._ephemeral_context_index = len(self.conversation_history)
+        self._ephemeral_context = context
+        self._append_message(Message(role="user", content=task.content))
         budget = AgentBudget.from_env()
 
         for _turn in range(budget.hard_max_iterations):
             budget.begin_iteration()
             if self.cancel.is_set():
                 yield StreamEvent("content", "\n⏹️ 用户取消")
+                self._clear_ephemeral_context()
                 yield StreamEvent("done", {"reason": "cancelled"})
                 return
 
@@ -117,6 +122,7 @@ class AgentLoop:
                 ):
                     if self.cancel.is_set():
                         yield StreamEvent("content", "\n⏹️ 用户取消")
+                        self._clear_ephemeral_context()
                         yield StreamEvent("done", {"reason": "cancelled"})
                         return
 
@@ -130,13 +136,16 @@ class AgentLoop:
                             if event.data.get("usage"):
                                 usage_data = event.data["usage"]
                             if event.data.get("reason") == "cancelled":
+                                self._clear_ephemeral_context()
                                 yield event
                                 return
                     elif event.type == "error":
+                        self._clear_ephemeral_context()
                         yield event
                         return
             except Exception as exc:
                 log.exception("[Agent:%s] LLM 调用失败", self.name)
+                self._clear_ephemeral_context()
                 yield StreamEvent("error", f"LLM 调用失败: {exc}")
                 yield StreamEvent("done", {"reason": "error"})
                 return
@@ -165,23 +174,28 @@ class AgentLoop:
             budget.record_tool_calls(response_msg.tool_calls)
 
             if budget.is_token_budget_exceeded():
+                self._clear_ephemeral_context()
                 yield from _budget_exit_events(self.name, budget, ExitReason.TOKEN_BUDGET_EXCEEDED)
                 return
 
             if not tool_calls_data:
+                self._clear_ephemeral_context()
                 yield StreamEvent("done", {"reason": "finished"})
                 return
 
             exit_reason = budget.check()
             if exit_reason != ExitReason.WITHIN_BUDGET:
+                self._clear_ephemeral_context()
                 yield from _budget_exit_events(self.name, budget, exit_reason)
                 return
 
             tool_done_reason = yield from self._execute_tool_calls(tool_calls_data)
             if tool_done_reason:
+                self._clear_ephemeral_context()
                 yield StreamEvent("done", {"reason": tool_done_reason})
                 return
 
+        self._clear_ephemeral_context()
         yield StreamEvent("content", f"\n⚠️ 达到最大轮数 {budget.hard_max_iterations}")
         yield StreamEvent("done", {"reason": "max_turns"})
 
@@ -198,7 +212,26 @@ class AgentLoop:
         self.conversation_history.extend(existing)
 
     def _messages_for_model(self) -> list[Message]:
-        return self.conversation_history
+        if self._ephemeral_context_index is None or not self._ephemeral_context:
+            return self.conversation_history
+        if self._ephemeral_context_index >= len(self.conversation_history):
+            return self.conversation_history
+        messages = list(self.conversation_history)
+        current = messages[self._ephemeral_context_index]
+        if current.role != "user":
+            return self.conversation_history
+        messages[self._ephemeral_context_index] = Message(
+            role=current.role,
+            content=_compose_task_content(current.content, self._ephemeral_context),
+            tool_calls=current.tool_calls,
+            tool_call_id=current.tool_call_id,
+            metadata=current.metadata,
+        )
+        return messages
+
+    def _clear_ephemeral_context(self) -> None:
+        self._ephemeral_context_index = None
+        self._ephemeral_context = ""
 
     def _append_message(self, message: Message) -> None:
         self.conversation_history.append(message)
