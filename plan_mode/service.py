@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from .state import PlanModeState
+from .tools import ExitPlanModeTool, PlanProposal
 
 
 def ensure_plan_mode_state(runtime: Any) -> PlanModeState:
@@ -42,3 +44,16 @@ def exit_plan_mode(runtime: Any, session: Any | None, plan: str) -> PlanModeStat
     state.exit(plan)
     persist_plan_mode(session, state)
     return state
+
+
+def register_exit_plan_mode_tool(
+    runtime: Any,
+    *,
+    confirm_plan: Callable[[PlanProposal], bool],
+    on_plan_approved: Callable[[str], None],
+) -> None:
+    registry = getattr(runtime, "registry", None)
+    register = getattr(registry, "register", None)
+    if register is None:
+        return
+    register(ExitPlanModeTool(confirm_plan=confirm_plan, on_plan_approved=on_plan_approved))

@@ -2148,6 +2148,8 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(selector.inputs, [])
         self.assertEqual(len(agent.inputs), 1)
         self.assertIn("单 Agent 计划执行模式", agent.inputs[0][0])
+        self.assertIn("## 当前模式: Plan Mode", agent.inputs[0][1])
+        self.assertIn("任务: 梳理 runtime 架构", agent.inputs[0][1])
         self.assertNotIn("## 当前 Skill", agent.inputs[0][1])
 
     def test_repl_auto_skill_selector_is_disabled_by_default(self):
@@ -2662,15 +2664,13 @@ class CliAgentTests(unittest.TestCase):
         self.assertEqual(react.inputs, [("你好", "")])
         self.assertEqual([event.type for event in renderer.events], ["content", "done"])
 
-    def test_run_once_routes_plan_command_to_react_agent(self):
+    def test_run_once_passes_plan_command_without_prompt_rewrite(self):
         react = _StubReactAgent()
 
         with contextlib.redirect_stdout(io.StringIO()):
             cli.run_once(react, "/plan 统计当前目录")
 
-        self.assertEqual(len(react.inputs), 1)
-        self.assertIn("单 Agent 计划执行模式", react.inputs[0][0])
-        self.assertIn("统计当前目录", react.inputs[0][0])
+        self.assertEqual(react.inputs, [("/plan 统计当前目录", "")])
 
     def test_run_once_passes_context_to_agent_events(self):
         react = _StubReactAgent()

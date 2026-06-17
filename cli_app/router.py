@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 from app_runtime import AppRuntime, RuntimeJournal, TurnBuffer
 from memory import MemoryProposal, ProposeMemoryTool
 from plan_mode import (
-    ExitPlanModeTool,
     PlanModeState,
     PlanProposal,
     attach_session_plan_mode,
@@ -16,6 +15,7 @@ from plan_mode import (
     exit_plan_mode,
     format_plan_mode_status,
     persist_plan_mode,
+    register_exit_plan_mode_tool,
 )
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
@@ -108,7 +108,7 @@ class ReplRouter:
         self.confirm_plan = confirm_plan or self._default_confirm_plan
         self.run_interactive_in_worker = run_interactive_in_worker
         _register_propose_memory_tool(self.runtime, self.long_term, confirm_memory=self.confirm_memory)
-        _register_exit_plan_mode_tool(
+        register_exit_plan_mode_tool(
             self.runtime,
             confirm_plan=self.confirm_plan,
             on_plan_approved=self._on_plan_approved,
@@ -313,11 +313,6 @@ class ReplRouter:
             self.renderer.message("用法: /exit-plan <已批准的计划内容>")
             return
         exit_plan_mode(self.app_runtime, self.session, plan_input)
-        self.runtime_context_builder = (
-            self.app_runtime.session_runtime.build_context(self.session)
-            if self.session is not None
-            else None
-        )
         self.renderer.message("已退出 plan mode，计划已记录。")
 
     def _handle_plugins(self) -> None:
@@ -436,9 +431,6 @@ class ReplRouter:
             # Already exited or not in plan mode
             return
         exit_plan_mode(self.app_runtime, self.session, plan)
-        # Rebuild context for next turn
-        if self.session is not None:
-            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
 
     def cancel_current(self, reason: str = "user_cancelled") -> bool:
         return self.app_runtime.task_runtime.cancel_current(reason=reason)
@@ -745,16 +737,3 @@ def _register_propose_memory_tool(runtime: Any, long_term: Any, *, confirm_memor
         return
     register(ProposeMemoryTool(long_term, confirm_memory=confirm_memory))
 
-
-def _register_exit_plan_mode_tool(
-    runtime: Any,
-    *,
-    confirm_plan: Callable[[PlanProposal], bool],
-    on_plan_approved: Callable[[str], None],
-) -> None:
-    """注册 exit_plan_mode 工具到运行时。"""
-    registry = getattr(runtime, "registry", None)
-    register = getattr(registry, "register", None)
-    if register is None:
-        return
-    register(ExitPlanModeTool(confirm_plan=confirm_plan, on_plan_approved=on_plan_approved))

@@ -117,6 +117,7 @@ class AppRuntime:
             plan_mode_state=plan_state,
         )
         register_plan_mode_guard(runtime.tool_runtime, lambda: runtime.plan_mode_state.active if runtime.plan_mode_state else False)
+        runtime.session_runtime.plan_mode_provider = lambda: runtime.plan_mode_state
         runtime.tool_runtime.registry.register(
             ExploreAgentTool(parent_runtime=runtime.tool_runtime, chat_stream_fn=runtime.chat_stream)
         )

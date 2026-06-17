@@ -16,6 +16,7 @@ from .service import (
     ensure_plan_mode_state,
     exit_plan_mode,
     persist_plan_mode,
+    register_exit_plan_mode_tool,
 )
 from .state import DEFAULT_MODE, PLAN_MODE, PlanModeState
 from .tools import ExitPlanModeTool, PlanProposal
@@ -41,5 +42,6 @@ __all__ = [
     "is_read_only_shell_command",
     "persist_plan_mode",
     "plan_mode_context",
+    "register_exit_plan_mode_tool",
     "register_plan_mode_guard",
 ]

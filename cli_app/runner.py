@@ -13,7 +13,6 @@ from mcp_integration import load_mcp_config
 from memory import build_long_term_memory
 from plugin_runtime import PluginManager
 from sessions import RuntimeContextBuilder, SessionStore
-from .commands import parse_plan_command
 from .constants import BANNER
 from .router import ReplRouter
 from .terminal_input import build_prompt
@@ -36,13 +35,6 @@ def run_once(
     turn_id: str | None = None,
 ) -> str:
     renderer = renderer or TerminalRenderer()
-    plan_input = parse_plan_command(user_input)
-    if plan_input is not None:
-        task = plan_input or "请先制定计划"
-        user_input = (
-            "单 Agent 计划执行模式：先探索现有上下文并提出实施计划，不要直接修改文件。\n"
-            f"任务: {task}"
-        )
     return runtime_run_agent_once(
         agent,
         user_input,

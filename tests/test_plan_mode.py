@@ -389,13 +389,31 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
             cwd.mkdir()
             session = store.create(cwd)
 
-            plan_state_dict = {"mode": PLAN_MODE, "task": "实现登录", "pre_mode": DEFAULT_MODE, "approved_plan": ""}
-            builder = RuntimeContextBuilder(session=session, plan_mode=plan_state_dict)
+            plan_state = PlanModeState()
+            plan_state.enter("实现登录")
+            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
             context = builder.build("用户查询")
 
             self.assertIn("## 当前模式: Plan Mode", context)
             self.assertIn("任务: 实现登录", context)
             self.assertIn("只读计划模式", context)
+
+    def test_context_builder_reads_live_plan_mode_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(root=Path(tmpdir))
+            cwd = Path(tmpdir) / "project"
+            cwd.mkdir()
+            session = store.create(cwd)
+
+            plan_state = PlanModeState()
+            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
+            self.assertNotIn("## 当前模式: Plan Mode", builder.build("用户查询"))
+
+            plan_state.enter("实现登录")
+            context = builder.build("用户查询")
+
+            self.assertIn("## 当前模式: Plan Mode", context)
+            self.assertIn("任务: 实现登录", context)
 
     def test_context_builder_injects_approved_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,13 +422,10 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
             cwd.mkdir()
             session = store.create(cwd)
 
-            plan_state_dict = {
-                "mode": DEFAULT_MODE,
-                "task": "",
-                "pre_mode": None,
-                "approved_plan": "步骤 1: 准备\n步骤 2: 执行",
-            }
-            builder = RuntimeContextBuilder(session=session, plan_mode=plan_state_dict)
+            plan_state = PlanModeState()
+            plan_state.enter("任务")
+            plan_state.exit("步骤 1: 准备\n步骤 2: 执行")
+            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
             context = builder.build("用户查询")
 
             self.assertIn("## 已批准计划", context)
@@ -424,7 +439,7 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
             cwd.mkdir()
             session = store.create(cwd)
 
-            builder = RuntimeContextBuilder(session=session, plan_mode=None)
+            builder = RuntimeContextBuilder(session=session)
             context = builder.build("用户查询")
 
             self.assertNotIn("## 当前模式: Plan Mode", context)

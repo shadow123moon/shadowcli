@@ -21,6 +21,7 @@ class PreparedAgentRun:
 @dataclass
 class SessionRuntime:
     long_term_memory: Any
+    plan_mode_provider: Callable[[], Any] | None = None
 
     def prepare_agent_run(
         self,
@@ -69,7 +70,7 @@ class SessionRuntime:
         return RuntimeContextBuilder(
             session=session,
             long_term=self.long_term_memory,
-            plan_mode=getattr(session.meta, "plan_mode", None),
+            plan_mode_provider=self.plan_mode_provider,
         )
 
 
