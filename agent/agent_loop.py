@@ -10,7 +10,7 @@ from typing import Callable
 
 from llm import FunctionCall, Message, ToolCall, chat_stream
 from llm.usage import normalize_usage, usage_to_metadata
-from plan_mode import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
+from plan_mode.policy import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
 from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
@@ -105,7 +105,7 @@ class AgentLoop:
                     definitions = filter_tool_definitions_for_plan_mode(definitions, self.tool_registry)
                 else:
                     definitions = filter_tool_definitions_for_default_mode(definitions, self.tool_registry)
-                tools_schema = filter_tool_definitions_for_model(definitions, task.content)
+                tools_schema = filter_tool_definitions_for_model(definitions)
                 if not tools_schema:
                     tools_schema = None
 

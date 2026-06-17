@@ -6,11 +6,11 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from agent import ReactAgent
+from agent import AgentLoop, ReactAgent
 from llm import Message, chat as default_chat, chat_stream as default_chat_stream
 from memory import DEFAULT_LONG_TERM_NAME, TextLongTermMemory
 from mcp_integration import McpServerManager, McpToolWrapper, load_mcp_config
-from plan_mode import PlanModeState, register_plan_mode_guard
+from plan_mode import PlanModeState, plan_mode_context, register_plan_mode_guard
 from plan_mode.agents import ExploreAgentTool, PlanAgentTool
 from plugin_runtime import PluginManager
 from sessions import NavigationPlan, SessionStore
@@ -117,12 +117,22 @@ class AppRuntime:
             plan_mode_state=plan_state,
         )
         register_plan_mode_guard(runtime.tool_runtime, lambda: runtime.plan_mode_state.active if runtime.plan_mode_state else False)
-        runtime.session_runtime.plan_mode_provider = lambda: runtime.plan_mode_state
-        runtime.tool_runtime.registry.register(
-            ExploreAgentTool(parent_runtime=runtime.tool_runtime, chat_stream_fn=runtime.chat_stream)
+        runtime.session_runtime.extra_context_provider = (
+            lambda: plan_mode_context(runtime.plan_mode_state) if runtime.plan_mode_state else ""
         )
         runtime.tool_runtime.registry.register(
-            PlanAgentTool(parent_runtime=runtime.tool_runtime, chat_stream_fn=runtime.chat_stream)
+            ExploreAgentTool(
+                parent_runtime=runtime.tool_runtime,
+                chat_stream_fn=runtime.chat_stream,
+                agent_loop_factory=AgentLoop,
+            )
+        )
+        runtime.tool_runtime.registry.register(
+            PlanAgentTool(
+                parent_runtime=runtime.tool_runtime,
+                chat_stream_fn=runtime.chat_stream,
+                agent_loop_factory=AgentLoop,
+            )
         )
         runtime.event_bus.publish("runtime.created", cwd=project_cwd)
         return runtime
@@ -160,7 +170,11 @@ class AppRuntime:
 
     def build_branch_summary(self, plan: NavigationPlan) -> str:
         """Summarize the branch that will be left during session navigation."""
-        return generate_branch_summary(plan, chat_fn=self.chat)
+        try:
+            return generate_branch_summary(plan, chat_fn=self.chat)
+        except Exception as exc:
+            log.exception("[分支摘要] 生成失败")
+            return f"分支摘要生成失败，已跳转但未生成模型摘要: {exc}"
 
     def plugin_status(self) -> tuple[list[Any], list[Any]]:
         """Return loaded plugins and plugin diagnostics."""

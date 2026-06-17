@@ -21,7 +21,7 @@ class PreparedAgentRun:
 @dataclass
 class SessionRuntime:
     long_term_memory: Any
-    plan_mode_provider: Callable[[], Any] | None = None
+    extra_context_provider: Callable[[], str] | None = None
 
     def prepare_agent_run(
         self,
@@ -57,8 +57,15 @@ class SessionRuntime:
         *,
         chat_fn: Callable[..., Any] | None = None,
     ) -> PreparedAgentRun:
-        kwargs = {"chat_fn": chat_fn} if chat_fn is not None else {}
-        result = compact_session(session, force=True, **kwargs)
+        try:
+            kwargs = {"chat_fn": chat_fn} if chat_fn is not None else {}
+            result = compact_session(session, force=True, **kwargs)
+        except Exception as exc:
+            log.exception("[会话压缩] 手动压缩失败")
+            return PreparedAgentRun(
+                context_builder=self.build_context(session),
+                warning=f"[WARN] 手动压缩失败，继续使用未压缩上下文: {exc}",
+            )
         if result.compacted:
             reload_agent_conversation(agent, session)
         return PreparedAgentRun(
@@ -70,7 +77,7 @@ class SessionRuntime:
         return RuntimeContextBuilder(
             session=session,
             long_term=self.long_term_memory,
-            plan_mode_provider=self.plan_mode_provider,
+            extra_context_provider=self.extra_context_provider,
         )
 
 

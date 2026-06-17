@@ -1,7 +1,7 @@
 from collections.abc import Callable
 
 from llm.types import Message
-from plan_mode import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
+from plan_mode.policy import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
 from tooling import ToolRegistry
 
 from .agent_loop import AgentLoop

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agent.agent_loop import AgentLoop
 from llm import Message
 from tooling.base import Tool
 
@@ -24,9 +23,10 @@ class ExploreAgentTool(Tool):
         "它只能读文件、搜索和执行受限只读 shell，不能修改文件或退出 plan mode。"
     )
 
-    def __init__(self, *, parent_runtime: Any, chat_stream_fn: Any):
+    def __init__(self, *, parent_runtime: Any, chat_stream_fn: Any, agent_loop_factory: Any):
         self.parent_runtime = parent_runtime
         self.chat_stream_fn = chat_stream_fn
+        self.agent_loop_factory = agent_loop_factory
 
     @property
     def name(self) -> str:
@@ -59,6 +59,7 @@ class ExploreAgentTool(Tool):
             task=task,
             parent_runtime=self.parent_runtime,
             chat_stream_fn=self.chat_stream_fn,
+            agent_loop_factory=self.agent_loop_factory,
         )
 
 
@@ -74,9 +75,10 @@ class PlanAgentTool(Tool):
         "它基于给定背景提出计划，不修改文件，不退出 plan mode。"
     )
 
-    def __init__(self, *, parent_runtime: Any, chat_stream_fn: Any):
+    def __init__(self, *, parent_runtime: Any, chat_stream_fn: Any, agent_loop_factory: Any):
         self.parent_runtime = parent_runtime
         self.chat_stream_fn = chat_stream_fn
+        self.agent_loop_factory = agent_loop_factory
 
     @property
     def name(self) -> str:
@@ -115,6 +117,7 @@ class PlanAgentTool(Tool):
             task=content,
             parent_runtime=self.parent_runtime,
             chat_stream_fn=self.chat_stream_fn,
+            agent_loop_factory=self.agent_loop_factory,
         )
 
 
@@ -141,9 +144,17 @@ class _ReadOnlyRuntimeView:
         return self.parent_runtime.execute(name, arguments, **context)
 
 
-def _run_plan_subagent(*, name: str, system_prompt: str, task: str, parent_runtime: Any, chat_stream_fn: Any) -> str:
+def _run_plan_subagent(
+    *,
+    name: str,
+    system_prompt: str,
+    task: str,
+    parent_runtime: Any,
+    chat_stream_fn: Any,
+    agent_loop_factory: Any,
+) -> str:
     runtime = _ReadOnlyRuntimeView(parent_runtime)
-    loop = AgentLoop(
+    loop = agent_loop_factory(
         name=name,
         system_prompt=system_prompt,
         chat=chat_stream_fn,

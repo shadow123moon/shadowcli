@@ -115,6 +115,6 @@ def _available_tools_section(tools_desc: str) -> str:
 {tools_desc}"""
 
 
-def filter_tool_definitions_for_model(definitions: list[dict], user_input: str | None = None) -> list[dict]:
+def filter_tool_definitions_for_model(definitions: list[dict]) -> list[dict]:
     """Return the stable model-visible tool set for the current runtime."""
     return definitions

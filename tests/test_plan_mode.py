@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+from agent import AgentLoop
 from plan_mode import (
     DEFAULT_MODE,
     PLAN_MODE,
@@ -276,8 +277,16 @@ class TestPlanModeGuard(unittest.TestCase):
         self.assertNotIn("edit", names)
 
     def test_filters_plan_subagents_visible_in_plan_mode(self):
-        self.registry.register(ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
-        self.registry.register(PlanAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
+        self.registry.register(ExploreAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=AgentLoop,
+        ))
+        self.registry.register(PlanAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=AgentLoop,
+        ))
 
         definitions = filter_tool_definitions_for_plan_mode(
             self.runtime.get_all_definitions(),
@@ -290,7 +299,11 @@ class TestPlanModeGuard(unittest.TestCase):
 
     def test_plan_subagents_are_blocked_outside_plan_mode(self):
         self.plan_mode_active = False
-        self.registry.register(ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=lambda *a, **k: None))
+        self.registry.register(ExploreAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=AgentLoop,
+        ))
 
         result = self.runtime.execute("explore_agent", {"task": "查结构"})
 
@@ -304,7 +317,11 @@ class TestPlanModeGuard(unittest.TestCase):
             yield StreamEvent("content", "探索摘要")
             yield StreamEvent("done", {"reason": "finished"})
 
-        tool = ExploreAgentTool(parent_runtime=self.runtime, chat_stream_fn=fake_stream)
+        tool = ExploreAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=fake_stream,
+            agent_loop_factory=AgentLoop,
+        )
 
         result = tool.execute({"task": "查 runtime"})
 
@@ -391,7 +408,10 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
 
             plan_state = PlanModeState()
             plan_state.enter("实现登录")
-            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
+            builder = RuntimeContextBuilder(
+                session=session,
+                extra_context_provider=lambda: plan_mode_context(plan_state),
+            )
             context = builder.build("用户查询")
 
             self.assertIn("## 当前模式: Plan Mode", context)
@@ -406,7 +426,10 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
             session = store.create(cwd)
 
             plan_state = PlanModeState()
-            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
+            builder = RuntimeContextBuilder(
+                session=session,
+                extra_context_provider=lambda: plan_mode_context(plan_state),
+            )
             self.assertNotIn("## 当前模式: Plan Mode", builder.build("用户查询"))
 
             plan_state.enter("实现登录")
@@ -425,7 +448,10 @@ class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
             plan_state = PlanModeState()
             plan_state.enter("任务")
             plan_state.exit("步骤 1: 准备\n步骤 2: 执行")
-            builder = RuntimeContextBuilder(session=session, plan_mode_provider=lambda: plan_state)
+            builder = RuntimeContextBuilder(
+                session=session,
+                extra_context_provider=lambda: plan_mode_context(plan_state),
+            )
             context = builder.build("用户查询")
 
             self.assertIn("## 已批准计划", context)

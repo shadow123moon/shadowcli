@@ -275,6 +275,8 @@ class ReplRouter:
             chat_fn=self.app_runtime.chat,
         )
         self.runtime_context_builder = prepared.context_builder
+        if prepared.warning:
+            self.renderer.message(prepared.warning)
         if prepared.compaction_result is not None:
             self.renderer.message(format_compaction_result(prepared.compaction_result))
 

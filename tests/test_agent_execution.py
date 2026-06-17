@@ -2607,6 +2607,31 @@ class CliAgentTests(unittest.TestCase):
         self.assertIsInstance(leaf, BranchSummaryEntry)
         self.assertEqual(leaf.summary, "总结旧分支")
 
+    def test_repl_jump_summary_degrades_when_llm_summary_fails(self):
+        runtime = ToolRuntime(ToolRegistry())
+        renderer = _CaptureRenderer(branch_choice=BranchNavigationChoice.SUMMARIZE)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session, target_id, _old_leaf_id = _branching_session(Path(tmp))
+            import cli_app.runner as runner
+            with (
+                patch("cli_app.runner.load_dotenv"),
+                patch("app_runtime.runtime._configure_logging_once"),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=_StubReactAgent()),
+                patch("app_runtime.runtime.default_chat", side_effect=TimeoutError("summary timeout")),
+                patch("builtins.input", side_effect=[f"/jump {target_id}", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        leaf = session.all_entries()[-1]
+        self.assertIsInstance(leaf, BranchSummaryEntry)
+        self.assertIn("分支摘要生成失败", leaf.summary)
+        self.assertTrue(any(message.startswith("已跳转到:") for message in renderer.messages))
+
     def test_repl_jump_uses_injected_renderer_for_branch_choice_and_messages(self):
         runtime = ToolRuntime(ToolRegistry())
         renderer = _CaptureRenderer(branch_choice=BranchNavigationChoice.DIRECT)
@@ -2663,6 +2688,38 @@ class CliAgentTests(unittest.TestCase):
         self.assertIsInstance(leaf, CompactionEntry)
         self.assertEqual([message.content for message in agent.reloaded[-1]], ["新问题", "新回答"])
         self.assertIn("已压缩", "\n".join(renderer.messages))
+
+    def test_repl_compact_command_degrades_when_llm_summary_fails(self):
+        runtime = ToolRuntime(ToolRegistry())
+        agent = _StubReactAgent()
+        renderer = _CaptureRenderer()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            session = SessionStore(root=Path(tmp) / "sessions").create(cwd)
+            session.append_message(Message(role="user", content="旧问题"))
+            session.append_message(Message(role="assistant", content="旧回答"))
+            session.append_message(Message(role="user", content="新问题"))
+            session.append_message(Message(role="assistant", content="新回答"))
+
+            import cli_app.runner as runner
+            with (
+                patch("cli_app.runner.load_dotenv"),
+                patch("app_runtime.runtime._configure_logging_once"),
+                patch("app_runtime.runtime.build_default_tool_runtime", return_value=runtime),
+                patch("cli_app.runner.build_long_term_memory", return_value=_StubLongTermMemory()),
+                patch("cli_app.runner.SessionStore", return_value=_FixedSessionStore(session, Path(tmp))),
+                patch("cli_app.runner.load_mcp_config", return_value={}),
+                patch("app_runtime.runtime.AppRuntime.build_agent", return_value=agent),
+                patch("app_runtime.runtime.default_chat", side_effect=TimeoutError("compact timeout")),
+                patch("builtins.input", side_effect=["/compact", EOFError]),
+            ):
+                runner.repl(renderer=renderer)
+
+        self.assertFalse(any(isinstance(entry, CompactionEntry) for entry in session.all_entries()))
+        self.assertFalse(agent.reloaded)
+        self.assertIn("[WARN] 手动压缩失败", "\n".join(renderer.messages))
 
     def test_repl_auto_compacts_before_running_when_branch_exceeds_threshold(self):
         runtime = ToolRuntime(ToolRegistry())
