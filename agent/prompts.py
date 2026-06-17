@@ -3,17 +3,6 @@ from __future__ import annotations
 
 import os
 
-MCP_INTENT_KEYWORDS = (
-    "mcp",
-    "devtools",
-    "chrome",
-    "browser",
-    "浏览器",
-    "外部工具",
-    "外部 server",
-    "外部服务器",
-)
-
 
 def react_agent_prompt(tools_desc: str, cwd: str | None = None, tool_guidance: str = "") -> str:
     cwd = cwd or os.getcwd()
@@ -127,16 +116,5 @@ def _available_tools_section(tools_desc: str) -> str:
 
 
 def filter_tool_definitions_for_model(definitions: list[dict], user_input: str | None = None) -> list[dict]:
-    """Hide duplicate MCP tools unless the user explicitly asks for MCP-style tools."""
-    if _should_expose_mcp_tools(user_input or ""):
-        return definitions
-    return [definition for definition in definitions if not _tool_name(definition).startswith("mcp__")]
-
-
-def _should_expose_mcp_tools(user_input: str) -> bool:
-    text = (user_input or "").lower()
-    return any(keyword in text for keyword in MCP_INTENT_KEYWORDS)
-
-
-def _tool_name(definition: dict) -> str:
-    return str(definition.get("function", {}).get("name", ""))
+    """Return the stable model-visible tool set for the current runtime."""
+    return definitions

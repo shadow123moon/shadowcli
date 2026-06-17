@@ -9,6 +9,9 @@ import requests
 from llm.types import ChatResponse, FunctionCall, Message, ToolCall
 from llm.usage import normalize_usage
 
+DEFAULT_CHAT_CONNECT_TIMEOUT = 10.0
+DEFAULT_CHAT_READ_TIMEOUT = 120.0
+
 
 @dataclass
 class StreamEvent:
@@ -32,6 +35,7 @@ def chat(
         api_key: str | None = None,
         api_url: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: float | tuple[float, float] | None = None,
 
 ) -> ChatResponse:
     """Call an OpenAI-compatible chat completion API."""
@@ -69,7 +73,7 @@ def chat(
     if extra_headers:
         headers.update(extra_headers)
 
-    resp = requests.post(api_url, headers=headers, json=body)
+    resp = requests.post(api_url, headers=headers, json=body, timeout=_chat_timeout(timeout))
     resp.raise_for_status()
     return _parse_response(resp.json())
 
@@ -204,6 +208,25 @@ def _usage_details_to_dict(details) -> dict:
     if hasattr(details, "model_dump"):
         return details.model_dump()
     return {"cached_tokens": getattr(details, "cached_tokens", 0)}
+
+
+def _chat_timeout(timeout: float | tuple[float, float] | None) -> float | tuple[float, float]:
+    if timeout is not None:
+        return timeout
+    connect = _env_float("SHADOWCLI_CHAT_CONNECT_TIMEOUT", DEFAULT_CHAT_CONNECT_TIMEOUT)
+    read = _env_float("SHADOWCLI_CHAT_READ_TIMEOUT", DEFAULT_CHAT_READ_TIMEOUT)
+    return (connect, read)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 def _message_to_dict(message: Message) -> dict:
     node = {"role": message.role, "content": message.content}

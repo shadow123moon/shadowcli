@@ -960,7 +960,7 @@ class ReactAgentTests(unittest.TestCase):
         self.assertIsNotNone(calls[0][1])
         self.assertEqual(calls[0][1][0]["function"]["name"], "read")
 
-    def test_react_file_task_hides_duplicate_mcp_tools_by_default(self):
+    def test_react_file_task_keeps_loaded_mcp_tools_visible_stably(self):
         calls = []
         agent = ReactAgent(_MixedToolDefinitionRegistry())
 
@@ -969,7 +969,7 @@ class ReactAgentTests(unittest.TestCase):
 
         names = [tool["function"]["name"] for tool in calls[0][1]]
         self.assertIn("bash", names)
-        self.assertNotIn("mcp__filesystem__search_files", names)
+        self.assertIn("mcp__filesystem__search_files", names)
 
     def test_default_mode_hides_plan_only_tools(self):
         calls = []
@@ -1011,6 +1011,18 @@ class ReactAgentTests(unittest.TestCase):
         names = [tool["function"]["name"] for tool in calls[0][1]]
         self.assertIn("bash", names)
         self.assertIn("mcp__filesystem__search_files", names)
+
+    def test_react_tool_schema_is_stable_across_mcp_keywords(self):
+        calls = []
+        agent = ReactAgent(_MixedToolDefinitionRegistry())
+
+        with patch("agent.agent_loop.chat_stream", _stream_content(calls, "ok")):
+            agent.run("统计项目代码量")
+            agent.run("用 MCP filesystem 看项目")
+
+        first_names = [tool["function"]["name"] for tool in calls[0][1]]
+        second_names = [tool["function"]["name"] for tool in calls[1][1]]
+        self.assertEqual(first_names, second_names)
 
     def test_react_agent_prompt_injects_working_directory(self):
         prompt = react_agent_prompt("- read: 读取文件", cwd="E:/demo/project")
@@ -1068,7 +1080,7 @@ class ReactAgentTests(unittest.TestCase):
         system_message = agent.conversation_messages[0]
         self.assertIn("## 工具说明", system_message.content)
         self.assertIn("- read: 使用 read 读取项目文件。", system_message.content)
-        self.assertNotIn("隐藏的 MCP 工具说明", system_message.content)
+        self.assertIn("隐藏的 MCP 工具说明", system_message.content)
 
     def test_react_keeps_tool_call_and_result_messages_between_turns(self):
         calls = []
@@ -1231,6 +1243,45 @@ class RuntimeContextBuilderTests(unittest.TestCase):
         self.assertIn("## 相关长期记忆", context)
         self.assertIn("用户偏好：普通输入走 React", context)
         self.assertNotIn("短期对话不应该重复注入", context)
+
+
+class LlmClientTests(unittest.TestCase):
+    def test_non_streaming_chat_uses_default_timeout(self):
+        from llm.client import chat
+
+        response = _FakePostResponse({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {},
+        })
+
+        with patch("llm.client.requests.post", return_value=response) as post:
+            chat(
+                [Message(role="user", content="hi")],
+                model="test-model",
+                api_key="test-key",
+                api_url="http://test.invalid/v1",
+            )
+
+        self.assertEqual(post.call_args.kwargs["timeout"], (10.0, 120.0))
+
+    def test_non_streaming_chat_accepts_explicit_timeout(self):
+        from llm.client import chat
+
+        response = _FakePostResponse({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {},
+        })
+
+        with patch("llm.client.requests.post", return_value=response) as post:
+            chat(
+                [Message(role="user", content="hi")],
+                model="test-model",
+                api_key="test-key",
+                api_url="http://test.invalid/v1",
+                timeout=(1.0, 2.0),
+            )
+
+        self.assertEqual(post.call_args.kwargs["timeout"], (1.0, 2.0))
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -3162,6 +3213,17 @@ class _StubTool:
 
     def execute(self, arguments):
         return self.result
+
+
+class _FakePostResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
 
 
 class _MetadataTool:
