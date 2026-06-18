@@ -11,7 +11,7 @@ from llm import Message, chat as default_chat, chat_stream as default_chat_strea
 from memory import DEFAULT_LONG_TERM_NAME, TextLongTermMemory
 from mcp_integration import McpServerManager, McpToolWrapper, load_mcp_config
 from plan_mode import PlanModeState, plan_mode_context, register_plan_mode_guard
-from plan_mode.agents import ExploreAgentTool, PlanAgentTool
+from plan_mode.agents import ExploreAgentTool, ForkExploreAgentsTool, PlanAgentTool
 from plugin_runtime import PluginManager
 from sessions import NavigationPlan, SessionStore
 from sessions.summarizer import generate_branch_summary
@@ -56,6 +56,7 @@ class AppRuntime:
     chat_stream_fn: ChatFn
     mcp_manager: McpServerManager | None = None
     plan_mode_state: PlanModeState | None = None
+    active_conversation_messages: list[Message] | None = None
 
     @classmethod
     def create(
@@ -125,6 +126,7 @@ class AppRuntime:
                 parent_runtime=runtime.tool_runtime,
                 chat_stream_fn=runtime.chat_stream,
                 agent_loop_factory=AgentLoop,
+                parent_messages_provider=lambda: runtime.active_conversation_messages or [],
             )
         )
         runtime.tool_runtime.registry.register(
@@ -132,6 +134,15 @@ class AppRuntime:
                 parent_runtime=runtime.tool_runtime,
                 chat_stream_fn=runtime.chat_stream,
                 agent_loop_factory=AgentLoop,
+                parent_messages_provider=lambda: runtime.active_conversation_messages or [],
+            )
+        )
+        runtime.tool_runtime.registry.register(
+            ForkExploreAgentsTool(
+                parent_runtime=runtime.tool_runtime,
+                chat_stream_fn=runtime.chat_stream,
+                agent_loop_factory=AgentLoop,
+                parent_messages_provider=lambda: runtime.active_conversation_messages or [],
             )
         )
         runtime.event_bus.publish("runtime.created", cwd=project_cwd)
@@ -144,10 +155,12 @@ class AppRuntime:
         on_message_appended: Callable[[Message], None] | None = None,
     ) -> ReactAgent:
         """Create a ReAct agent bound to this runtime's tool runtime and chat entrypoint."""
+        active_messages = conversation_messages if conversation_messages is not None else []
+        self.active_conversation_messages = active_messages
         return ReactAgent(
             self.tool_runtime,
             chat_stream_fn=self.chat_stream,
-            conversation_messages=conversation_messages,
+            conversation_messages=active_messages,
             on_message_appended=on_message_appended,
             plan_mode_active=lambda: self.plan_mode_state.active if self.plan_mode_state else False,
         )

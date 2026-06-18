@@ -1,10 +1,13 @@
 """Tests for plan mode state management and runtime guards."""
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from agent import AgentLoop
+from llm import FunctionCall, Message, ToolCall
 from plan_mode import (
     DEFAULT_MODE,
     PLAN_MODE,
@@ -15,7 +18,7 @@ from plan_mode import (
     plan_mode_context,
     register_plan_mode_guard,
 )
-from plan_mode.agents import ExploreAgentTool, PlanAgentTool
+from plan_mode.agents import ExploreAgentTool, ForkExploreAgentsTool, PlanAgentTool
 from plan_mode.state import _normalize_text
 from plan_mode.tools import ExitPlanModeTool, PlanProposal
 from llm.client import StreamEvent
@@ -287,6 +290,12 @@ class TestPlanModeGuard(unittest.TestCase):
             chat_stream_fn=lambda *a, **k: None,
             agent_loop_factory=AgentLoop,
         ))
+        self.registry.register(ForkExploreAgentsTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=AgentLoop,
+            parent_messages_provider=lambda: [],
+        ))
 
         definitions = filter_tool_definitions_for_plan_mode(
             self.runtime.get_all_definitions(),
@@ -296,6 +305,7 @@ class TestPlanModeGuard(unittest.TestCase):
 
         self.assertIn("explore_agent", names)
         self.assertIn("plan_agent", names)
+        self.assertIn("fork_explore_agents", names)
 
     def test_plan_subagents_are_blocked_outside_plan_mode(self):
         self.plan_mode_active = False
@@ -329,6 +339,181 @@ class TestPlanModeGuard(unittest.TestCase):
         self.assertIn("read", calls[0])
         self.assertNotIn("write", calls[0])
         self.assertNotIn("edit", calls[0])
+
+    def test_fork_explore_agents_runs_tasks_in_parallel_and_preserves_parent_history(self):
+        parent_messages = [
+            Message(role="user", content="父任务"),
+            Message(role="assistant", content="父回答"),
+        ]
+        histories: list[list[Message]] = []
+        started_at: list[float] = []
+
+        class FakeLoop:
+            def __init__(self, **kwargs):
+                self.conversation_history = kwargs["conversation_history"]
+                histories.append(self.conversation_history)
+
+            def execute(self, task, allow_tools=True):
+                started_at.append(time.monotonic())
+                time.sleep(0.12)
+                self.conversation_history.append(Message(role="user", content=task.content))
+                yield StreamEvent("content", f"完成:{task.content}")
+                yield StreamEvent("done", {"reason": "finished"})
+
+        tool = ForkExploreAgentsTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=FakeLoop,
+            parent_messages_provider=lambda: parent_messages,
+        )
+
+        started = time.monotonic()
+        result = tool.execute({"tasks": ["查 session", "查 tooling", "查 plan"]})
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.30)
+        self.assertEqual(len(histories), 3)
+        self.assertTrue(all(history[:2] == parent_messages for history in histories))
+        self.assertEqual([message.content for message in parent_messages], ["父任务", "父回答"])
+        self.assertIn("## 1. 查 session", result)
+        self.assertIn("完成:查 session", result)
+        self.assertIn("## 2. 查 tooling", result)
+        self.assertIn("## 3. 查 plan", result)
+        self.assertLess(max(started_at) - min(started_at), 0.08)
+
+    def test_fork_explore_agents_drops_in_flight_parent_tool_call_from_prefix(self):
+        captured_messages: list[list[Message]] = []
+        parent_messages = [
+            Message(role="user", content="父任务"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_fork",
+                        function=FunctionCall(name="fork_explore_agents", arguments="{}"),
+                    )
+                ],
+            ),
+        ]
+
+        def fake_stream(messages, tools=None, cancel=None):
+            captured_messages.append(list(messages))
+            yield StreamEvent("content", "探索摘要")
+            yield StreamEvent("done", {"reason": "finished"})
+
+        tool = ForkExploreAgentsTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=fake_stream,
+            agent_loop_factory=AgentLoop,
+            parent_messages_provider=lambda: parent_messages,
+        )
+
+        result = tool.execute({"tasks": ["查 runtime"]})
+
+        self.assertIn("探索摘要", result)
+        self.assertEqual(len(captured_messages), 1)
+        sent = captured_messages[0]
+        self.assertEqual([message.content for message in parent_messages], ["父任务", None])
+        self.assertFalse(any(message.tool_calls for message in sent))
+        self.assertEqual(sent[-1].role, "user")
+        self.assertEqual(sent[-1].content, "查 runtime")
+
+    def test_single_explore_agent_drops_in_flight_parent_tool_call_from_prefix(self):
+        captured_messages: list[list[Message]] = []
+        parent_messages = [
+            Message(role="user", content="父任务"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_explore",
+                        function=FunctionCall(name="explore_agent", arguments="{}"),
+                    )
+                ],
+            ),
+        ]
+
+        def fake_stream(messages, tools=None, cancel=None):
+            captured_messages.append(list(messages))
+            yield StreamEvent("content", "探索摘要")
+            yield StreamEvent("done", {"reason": "finished"})
+
+        tool = ExploreAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=fake_stream,
+            agent_loop_factory=AgentLoop,
+            parent_messages_provider=lambda: parent_messages,
+        )
+
+        result = tool.execute({"task": "查 runtime"})
+
+        self.assertEqual(result, "探索摘要")
+        self.assertFalse(any(message.tool_calls for message in captured_messages[0]))
+
+    def test_fork_explore_agents_propagates_parent_cancel_to_children(self):
+        parent_cancel = threading.Event()
+        seen_cancel_events = []
+
+        class SlowLoop:
+            def __init__(self, **kwargs):
+                self.cancel = kwargs["cancel"]
+                seen_cancel_events.append(self.cancel)
+
+            def execute(self, task, allow_tools=True):
+                started = time.monotonic()
+                while not self.cancel.is_set() and time.monotonic() - started < 0.45:
+                    time.sleep(0.01)
+                yield StreamEvent("content", "cancelled" if self.cancel.is_set() else "late")
+                yield StreamEvent("done", {"reason": "finished"})
+
+        def trigger_cancel():
+            time.sleep(0.05)
+            parent_cancel.set()
+
+        tool = ForkExploreAgentsTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=SlowLoop,
+            parent_messages_provider=lambda: [],
+        )
+        threading.Thread(target=trigger_cancel).start()
+        context = type("Context", (), {"cancel": parent_cancel})()
+
+        started = time.monotonic()
+        result = tool.execute_with_context({"tasks": ["a", "b"]}, context)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.25)
+        self.assertTrue(seen_cancel_events)
+        self.assertTrue(all(event is parent_cancel for event in seen_cancel_events))
+        self.assertTrue("cancelled" in result or "已取消或超时" in result)
+
+    def test_fork_explore_agents_times_out_non_cooperative_children(self):
+        class SlowLoop:
+            def __init__(self, **kwargs):
+                self.cancel = kwargs["cancel"]
+
+            def execute(self, task, allow_tools=True):
+                time.sleep(0.35)
+                yield StreamEvent("content", "late")
+                yield StreamEvent("done", {"reason": "finished"})
+
+        tool = ForkExploreAgentsTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=SlowLoop,
+            parent_messages_provider=lambda: [],
+        )
+
+        with patch.dict("os.environ", {"SHADOWCLI_FORK_AGENT_TIMEOUT_SECONDS": "0.1"}):
+            started = time.monotonic()
+            result = tool.execute({"tasks": ["a"]})
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.25)
+        self.assertIn("已取消或超时", result)
 
     def test_blocks_write_tool_in_plan_mode(self):
         self.plan_mode_active = True
