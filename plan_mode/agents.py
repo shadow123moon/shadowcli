@@ -1,33 +1,25 @@
 from __future__ import annotations
 
-import os
-import threading
-import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Dict
 
-from llm import Message
+from agent.subagent_runner import fork_history, run_forked_subagents, run_subagent
 from tooling.base import Tool
 
 from .policy import PLAN_MODE_CONTROL, PLAN_MODE_READ, PLAN_MODE_SHELL, is_plan_mode_tool_visible
 
 
-_SUBAGENT_MAX_CHARS = 20000
 _MAX_FORK_TASKS = 4
-_DEFAULT_FORK_TIMEOUT_SECONDS = 120.0
 
 
-class ExploreAgentTool(Tool):
+class _SingleSubAgentTool(Tool):
     category = "plan"
     effect = "control"
     plan_mode = "control"
     plan_mode_only = True
     concurrency_safe = False
     result_kind = "text"
-    guidance = (
-        "explore_agent 用于在 plan mode 下派一个只读子 agent 探索代码。"
-        "它只能读文件、搜索和执行受限只读 shell，不能修改文件或退出 plan mode。"
-    )
+
+    agent_name = "subagent"
 
     def __init__(
         self,
@@ -41,6 +33,42 @@ class ExploreAgentTool(Tool):
         self.chat_stream_fn = chat_stream_fn
         self.agent_loop_factory = agent_loop_factory
         self.parent_messages_provider = parent_messages_provider or _empty_parent_messages
+
+    def execute(self, arguments: Dict) -> str:
+        return self._execute(arguments, cancel=None)
+
+    def execute_with_context(self, arguments: Dict, context) -> str:
+        return self._execute(arguments, cancel=getattr(context, "cancel", None))
+
+    def _execute(self, arguments: Dict, *, cancel) -> str:
+        content = self._task_content(arguments)
+        if not content:
+            return "错误: task 参数不能为空。"
+        return run_subagent(
+            name=self.agent_name,
+            system_prompt=self._system_prompt(),
+            task=content,
+            parent_runtime=self.parent_runtime,
+            chat_stream_fn=self.chat_stream_fn,
+            agent_loop_factory=self.agent_loop_factory,
+            tool_allowed=_subagent_tool_allowed,
+            conversation_history=fork_history(self.parent_messages_provider()),
+            cancel=cancel,
+        )
+
+    def _task_content(self, arguments: Dict) -> str:
+        raise NotImplementedError
+
+    def _system_prompt(self) -> str:
+        raise NotImplementedError
+
+
+class ExploreAgentTool(_SingleSubAgentTool):
+    agent_name = "explore"
+    guidance = (
+        "explore_agent 用于在 plan mode 下派一个只读子 agent 探索代码。"
+        "它只能读文件、搜索和执行受限只读 shell，不能修改文件或退出 plan mode。"
+    )
 
     @property
     def name(self) -> str:
@@ -63,52 +91,19 @@ class ExploreAgentTool(Tool):
             "required": ["task"],
         }
 
-    def execute(self, arguments: Dict) -> str:
-        return self._execute(arguments, cancel=None)
+    def _task_content(self, arguments: Dict) -> str:
+        return str(arguments.get("task") or "").strip()
 
-    def execute_with_context(self, arguments: Dict, context) -> str:
-        return self._execute(arguments, cancel=getattr(context, "cancel", None))
-
-    def _execute(self, arguments: Dict, *, cancel) -> str:
-        task = str(arguments.get("task") or "").strip()
-        if not task:
-            return "错误: task 参数不能为空。"
-        return _run_plan_subagent(
-            name="explore",
-            system_prompt=_explore_system_prompt(),
-            task=task,
-            parent_runtime=self.parent_runtime,
-            chat_stream_fn=self.chat_stream_fn,
-            agent_loop_factory=self.agent_loop_factory,
-            conversation_history=_fork_history(self.parent_messages_provider()),
-            cancel=cancel,
-        )
+    def _system_prompt(self) -> str:
+        return _explore_system_prompt()
 
 
-class PlanAgentTool(Tool):
-    category = "plan"
-    effect = "control"
-    plan_mode = "control"
-    plan_mode_only = True
-    concurrency_safe = False
-    result_kind = "text"
+class PlanAgentTool(_SingleSubAgentTool):
+    agent_name = "plan"
     guidance = (
         "plan_agent 用于在 plan mode 下派一个只读子 agent 设计实施方案。"
         "它基于给定背景提出计划，不修改文件，不退出 plan mode。"
     )
-
-    def __init__(
-        self,
-        *,
-        parent_runtime: Any,
-        chat_stream_fn: Any,
-        agent_loop_factory: Any,
-        parent_messages_provider: Any | None = None,
-    ):
-        self.parent_runtime = parent_runtime
-        self.chat_stream_fn = chat_stream_fn
-        self.agent_loop_factory = agent_loop_factory
-        self.parent_messages_provider = parent_messages_provider or _empty_parent_messages
 
     @property
     def name(self) -> str:
@@ -135,28 +130,13 @@ class PlanAgentTool(Tool):
             "required": ["task"],
         }
 
-    def execute(self, arguments: Dict) -> str:
-        return self._execute(arguments, cancel=None)
-
-    def execute_with_context(self, arguments: Dict, context) -> str:
-        return self._execute(arguments, cancel=getattr(context, "cancel", None))
-
-    def _execute(self, arguments: Dict, *, cancel) -> str:
+    def _task_content(self, arguments: Dict) -> str:
         task = str(arguments.get("task") or "").strip()
         context = str(arguments.get("context") or "").strip()
-        if not task:
-            return "错误: task 参数不能为空。"
-        content = task if not context else f"{task}\n\n已知背景:\n{context}"
-        return _run_plan_subagent(
-            name="plan",
-            system_prompt=_plan_system_prompt(),
-            task=content,
-            parent_runtime=self.parent_runtime,
-            chat_stream_fn=self.chat_stream_fn,
-            agent_loop_factory=self.agent_loop_factory,
-            conversation_history=_fork_history(self.parent_messages_provider()),
-            cancel=cancel,
-        )
+        return task if not context else f"{task}\n\n已知背景:\n{context}"
+
+    def _system_prompt(self) -> str:
+        return _plan_system_prompt()
 
 
 class ForkExploreAgentsTool(Tool):
@@ -221,143 +201,21 @@ class ForkExploreAgentsTool(Tool):
         if len(tasks) > _MAX_FORK_TASKS:
             return f"错误: fork_explore_agents 最多支持 {_MAX_FORK_TASKS} 个并行任务。"
 
-        parent_messages = _fork_history(self.parent_messages_provider())
-        results = _run_forked_explorations(
+        parent_messages = fork_history(self.parent_messages_provider())
+        results = run_forked_subagents(
             tasks=tasks,
+            system_prompt=_explore_system_prompt(),
             parent_messages=parent_messages,
             parent_runtime=self.parent_runtime,
             chat_stream_fn=self.chat_stream_fn,
             agent_loop_factory=self.agent_loop_factory,
+            tool_allowed=_subagent_tool_allowed,
             cancel=cancel,
         )
         return "\n\n".join(
             f"## {index + 1}. {task}\n{results[index]}"
             for index, task in enumerate(tasks)
         )
-
-
-class _ReadOnlyRuntimeView:
-    def __init__(self, parent_runtime: Any):
-        self.parent_runtime = parent_runtime
-        self.registry = self
-
-    def get(self, name: str):
-        tool = self.parent_runtime.get(name)
-        if not _subagent_tool_allowed(tool):
-            raise KeyError(name)
-        return tool
-
-    def get_all_definitions(self) -> list[dict]:
-        return [
-            definition
-            for definition in self.parent_runtime.get_all_definitions()
-            if _definition_visible(definition, self.parent_runtime)
-        ]
-
-    def execute(self, name: str, arguments: dict[str, Any], **context) -> str:
-        self.get(name)
-        return self.parent_runtime.execute(name, arguments, **context)
-
-
-def _run_plan_subagent(
-    *,
-    name: str,
-    system_prompt: str,
-    task: str,
-    parent_runtime: Any,
-    chat_stream_fn: Any,
-    agent_loop_factory: Any,
-    conversation_history: list[Message] | None = None,
-    cancel: threading.Event | None = None,
-) -> str:
-    runtime = _ReadOnlyRuntimeView(parent_runtime)
-    loop = agent_loop_factory(
-        name=name,
-        system_prompt=system_prompt,
-        chat=chat_stream_fn,
-        tool_registry=runtime,
-        conversation_history=conversation_history or [],
-        use_tools=True,
-        plan_mode_active=lambda: True,
-        cancel=cancel,
-    )
-
-    content_parts: list[str] = []
-    for event in loop.execute(Message(role="user", content=task), allow_tools=True):
-        if event.type == "content":
-            content_parts.append(str(event.data))
-        elif event.type == "error":
-            return f"{name}_agent 执行失败: {event.data}"
-        elif event.type == "done":
-            break
-
-    result = "".join(content_parts).strip()
-    if not result:
-        return f"{name}_agent 未返回内容。"
-    if len(result) > _SUBAGENT_MAX_CHARS:
-        return result[:_SUBAGENT_MAX_CHARS] + "\n...(已截断)"
-    return result
-
-
-def _run_forked_explorations(
-    *,
-    tasks: list[str],
-    parent_messages: list[Message],
-    parent_runtime: Any,
-    chat_stream_fn: Any,
-    agent_loop_factory: Any,
-    cancel: threading.Event | None = None,
-) -> list[str]:
-    results = [""] * len(tasks)
-    run_cancel = cancel or threading.Event()
-    executor = ThreadPoolExecutor(max_workers=len(tasks))
-    futures = {
-        executor.submit(
-            _run_plan_subagent,
-            name=f"explore-{index + 1}",
-            system_prompt=_explore_system_prompt(),
-            task=task,
-            parent_runtime=parent_runtime,
-            chat_stream_fn=chat_stream_fn,
-            agent_loop_factory=agent_loop_factory,
-            conversation_history=_fork_history(parent_messages),
-            cancel=run_cancel,
-        ): index
-        for index, task in enumerate(tasks)
-    }
-    pending = set(futures)
-    deadline = time.monotonic() + _fork_timeout_seconds()
-
-    try:
-        while pending:
-            if run_cancel.is_set():
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                run_cancel.set()
-                break
-            done, pending = wait(
-                pending,
-                timeout=min(0.05, remaining),
-                return_when=FIRST_COMPLETED,
-            )
-            for future in done:
-                index = futures[future]
-                try:
-                    results[index] = future.result()
-                except Exception as exc:
-                    results[index] = f"explore_agent 执行失败: {exc}"
-
-        if pending:
-            run_cancel.set()
-            for future in pending:
-                future.cancel()
-                index = futures[future]
-                results[index] = "explore_agent 已取消或超时。"
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-
-    return results
 
 
 def _normalize_fork_tasks(raw_tasks: Any) -> list[str]:
@@ -371,52 +229,8 @@ def _normalize_fork_tasks(raw_tasks: Any) -> list[str]:
     return tasks
 
 
-def _fork_history(messages: Any) -> list[Message]:
-    return _sanitize_fork_prefix(list(messages or []))
-
-
-def _sanitize_fork_prefix(messages: list[Message]) -> list[Message]:
-    sanitized: list[Message] = []
-    expected_tool_ids: set[str] = set()
-    pending_assistant_index: int | None = None
-
-    for message in messages:
-        if expected_tool_ids:
-            if message.role == "tool" and message.tool_call_id in expected_tool_ids:
-                sanitized.append(message)
-                expected_tool_ids.remove(str(message.tool_call_id))
-                if not expected_tool_ids:
-                    pending_assistant_index = None
-                continue
-            return sanitized[:pending_assistant_index]
-
-        if message.role == "tool":
-            return sanitized
-
-        sanitized.append(message)
-        if message.role == "assistant" and message.tool_calls:
-            expected_tool_ids = {tool_call.id for tool_call in message.tool_calls if tool_call.id}
-            pending_assistant_index = len(sanitized) - 1
-            if not expected_tool_ids:
-                return sanitized[:pending_assistant_index]
-
-    if expected_tool_ids and pending_assistant_index is not None:
-        return sanitized[:pending_assistant_index]
-    return sanitized
-
-
-def _empty_parent_messages() -> list[Message]:
+def _empty_parent_messages() -> list[Any]:
     return []
-
-
-def _fork_timeout_seconds() -> float:
-    raw = os.environ.get("SHADOWCLI_FORK_AGENT_TIMEOUT_SECONDS")
-    if not raw:
-        return _DEFAULT_FORK_TIMEOUT_SECONDS
-    try:
-        return max(0.1, float(raw))
-    except ValueError:
-        return _DEFAULT_FORK_TIMEOUT_SECONDS
 
 
 def _subagent_tool_allowed(tool: Any) -> bool:
@@ -428,19 +242,6 @@ def _subagent_tool_allowed(tool: Any) -> bool:
         PLAN_MODE_SHELL,
         "execute",
     }
-
-
-def _definition_visible(definition: dict, runtime: Any) -> bool:
-    function = definition.get("function")
-    if not isinstance(function, dict):
-        return False
-    name = function.get("name")
-    if not name:
-        return False
-    try:
-        return _subagent_tool_allowed(runtime.get(str(name)))
-    except KeyError:
-        return False
 
 
 def _explore_system_prompt() -> str:
