@@ -113,8 +113,3 @@ def _available_tools_section(tools_desc: str) -> str:
     return f"""## 可用工具
 可用工具：
 {tools_desc}"""
-
-
-def filter_tool_definitions_for_model(definitions: list[dict]) -> list[dict]:
-    """Return the stable model-visible tool set for the current runtime."""
-    return definitions

@@ -4,9 +4,10 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from typing import Any
+from typing import Any, Callable
 
 from .config import McpServerConfig
+from .transports import open_mcp_transport
 
 log = logging.getLogger(__name__)
 
@@ -20,11 +21,18 @@ class McpServerManager:
     - 对外提供同步接口
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        transport_factory: Callable[[McpServerConfig], Any] = open_mcp_transport,
+        session_factory: Callable[[Any, Any], Any] | None = None,
+    ):
         self.servers: dict[str, Any] = {}  # name -> ClientSession
         self.exit_stacks: dict[str, Any] = {}  # name -> AsyncExitStack，仅用于状态观察
         self.server_tasks: dict[str, asyncio.Task] = {}
         self.stop_events: dict[str, asyncio.Event] = {}
+        self.transport_factory = transport_factory
+        self.session_factory = session_factory
 
         # 后台 event loop
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -93,27 +101,20 @@ class McpServerManager:
     ) -> None:
         """在同一个 task 内 enter 和 exit MCP session 生命周期。"""
         from contextlib import AsyncExitStack
-        from mcp import ClientSession, StdioServerParameters
-        from mcp.client.stdio import stdio_client
-
-        server_params = StdioServerParameters(
-            command=config.command,
-            args=config.args,
-            env=config.env,
-        )
+        from mcp import ClientSession
 
         try:
             async with AsyncExitStack() as stack:
                 self.exit_stacks[name] = stack
 
-                # 启动子进程
                 read, write = await stack.enter_async_context(
-                    stdio_client(server_params)
+                    self.transport_factory(config)
                 )
 
                 # 创建 session
+                session_factory = self.session_factory or ClientSession
                 session = await stack.enter_async_context(
-                    ClientSession(read, write)
+                    session_factory(read, write)
                 )
 
                 # 初始化
@@ -180,11 +181,19 @@ class McpServerManager:
         # 合并多个 content 块
         parts = []
         for content in result.content:
-            if hasattr(content, "text"):
-                parts.append(content.text)
-            elif hasattr(content, "type") and content.type == "image":
+            text = getattr(content, "text", None)
+            if text is not None:
+                parts.append(str(text))
+                continue
+
+            content_type = getattr(content, "type", None)
+            if content_type == "image":
                 # Phase 1 暂时忽略图片
                 parts.append(f"[图片: {getattr(content, 'mimeType', 'unknown')}]")
+                continue
+
+            label = content_type or content.__class__.__name__
+            parts.append(f"[未支持的 MCP 内容: {label}]")
 
         return "\n".join(parts) if parts else ""
 

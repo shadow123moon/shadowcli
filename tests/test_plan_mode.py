@@ -12,7 +12,7 @@ from plan_mode import (
     DEFAULT_MODE,
     PLAN_MODE,
     PlanModeState,
-    filter_tool_definitions_for_plan_mode,
+    filter_tool_definitions_for_mode,
     format_plan_mode_status,
     is_read_only_shell_command,
     plan_mode_context,
@@ -267,9 +267,10 @@ class TestPlanModeGuard(unittest.TestCase):
             )
         )
 
-        definitions = filter_tool_definitions_for_plan_mode(
+        definitions = filter_tool_definitions_for_mode(
             self.runtime.get_all_definitions(),
             self.runtime,
+            plan_mode_active=True,
         )
         names = [definition["function"]["name"] for definition in definitions]
 
@@ -297,15 +298,34 @@ class TestPlanModeGuard(unittest.TestCase):
             parent_messages_provider=lambda: [],
         ))
 
-        definitions = filter_tool_definitions_for_plan_mode(
+        definitions = filter_tool_definitions_for_mode(
             self.runtime.get_all_definitions(),
             self.runtime,
+            plan_mode_active=True,
         )
         names = [definition["function"]["name"] for definition in definitions]
 
         self.assertIn("explore_agent", names)
         self.assertIn("plan_agent", names)
         self.assertIn("fork_explore_agents", names)
+
+    def test_filters_plan_only_tools_outside_plan_mode(self):
+        self.registry.register(ExploreAgentTool(
+            parent_runtime=self.runtime,
+            chat_stream_fn=lambda *a, **k: None,
+            agent_loop_factory=AgentLoop,
+        ))
+
+        definitions = filter_tool_definitions_for_mode(
+            self.runtime.get_all_definitions(),
+            self.runtime,
+            plan_mode_active=False,
+        )
+        names = [definition["function"]["name"] for definition in definitions]
+
+        self.assertIn("read", names)
+        self.assertIn("write", names)
+        self.assertNotIn("explore_agent", names)
 
     def test_plan_subagents_are_blocked_outside_plan_mode(self):
         self.plan_mode_active = False

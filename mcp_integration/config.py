@@ -1,25 +1,34 @@
 """MCP 服务器配置加载"""
 from __future__ import annotations
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 @dataclass
 class McpServerConfig:
     """MCP 服务器配置"""
-    command: str
-    args: list[str]
-    env: dict[str, str]
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
     disabled: bool = False
+    transport: str = "stdio"
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.transport = (self.transport or "stdio").lower()
 
     @classmethod
     def from_dict(cls, data: dict) -> McpServerConfig:
         return cls(
-            command=data["command"],
+            transport=data.get("transport", "stdio"),
+            command=data.get("command", ""),
             args=data.get("args", []),
             env=data.get("env", {}),
             disabled=data.get("disabled", False),
+            url=data.get("url", ""),
+            headers=data.get("headers", {}),
         )
 
 
@@ -35,6 +44,7 @@ def load_mcp_config() -> dict[str, McpServerConfig]:
         default_config = {
             "mcpServers": {
                 "filesystem": {
+                    "transport": "stdio",
                     "command": "npx",
                     "args": [
                         "-y",

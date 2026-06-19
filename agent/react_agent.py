@@ -1,11 +1,11 @@
 from collections.abc import Callable
 
 from llm.types import Message
-from plan_mode.policy import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
+from plan_mode.policy import filter_tool_definitions_for_mode
 from tooling import ToolRegistry
 
 from .agent_loop import AgentLoop
-from .prompts import filter_tool_definitions_for_model, react_agent_prompt
+from .prompts import react_agent_prompt
 
 
 class ReactAgent:
@@ -76,11 +76,11 @@ class ReactAgent:
 
 
 def _build_react_system_prompt(tool_registry: ToolRegistry, *, plan_mode_active: bool = False) -> str:
-    defs = filter_tool_definitions_for_model(tool_registry.get_all_definitions())
-    if plan_mode_active:
-        defs = filter_tool_definitions_for_plan_mode(defs, tool_registry)
-    else:
-        defs = filter_tool_definitions_for_default_mode(defs, tool_registry)
+    defs = filter_tool_definitions_for_mode(
+        tool_registry.get_all_definitions(),
+        tool_registry,
+        plan_mode_active=plan_mode_active,
+    )
     tools_desc = "\n".join(
         f"- {d['function']['name']}: {d['function']['description']}" for d in defs
     )

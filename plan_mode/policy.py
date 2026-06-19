@@ -74,26 +74,22 @@ def is_plan_mode_tool_allowed(name: str, arguments: dict[str, Any], tool: Any) -
     )
 
 
-def filter_tool_definitions_for_plan_mode(definitions: list[dict], registry: Any) -> list[dict]:
+def filter_tool_definitions_for_mode(
+    definitions: list[dict],
+    registry: Any,
+    *,
+    plan_mode_active: bool,
+) -> list[dict]:
     filtered: list[dict] = []
     for definition in definitions:
         name = _definition_name(definition)
         if not name:
             continue
         tool = _get_tool(registry, name)
-        if tool is not None and is_plan_mode_tool_visible(tool):
-            filtered.append(definition)
-    return filtered
-
-
-def filter_tool_definitions_for_default_mode(definitions: list[dict], registry: Any) -> list[dict]:
-    filtered: list[dict] = []
-    for definition in definitions:
-        name = _definition_name(definition)
-        if not name:
-            continue
-        tool = _get_tool(registry, name)
-        if tool is None or not getattr(tool, "plan_mode_only", False):
+        if plan_mode_active:
+            if tool is not None and is_plan_mode_tool_visible(tool):
+                filtered.append(definition)
+        elif tool is None or not getattr(tool, "plan_mode_only", False):
             filtered.append(definition)
     return filtered
 

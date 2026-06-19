@@ -10,11 +10,10 @@ from typing import Callable
 
 from llm import FunctionCall, Message, ToolCall, chat_stream
 from llm.usage import normalize_usage, usage_to_metadata
-from plan_mode.policy import filter_tool_definitions_for_default_mode, filter_tool_definitions_for_plan_mode
+from plan_mode.policy import filter_tool_definitions_for_mode
 from tooling.runtime import ToolExecutionBlocked
 
 from .budget import AgentBudget, ExitReason
-from .prompts import filter_tool_definitions_for_model
 
 log = logging.getLogger(__name__)
 TOOL_ACTION_PREVIEW_CHARS = 50
@@ -100,12 +99,11 @@ class AgentLoop:
 
             tools_schema = None
             if allow_tools and self.use_tools:
-                definitions = self.tool_registry.get_all_definitions()
-                if self.plan_mode_active():
-                    definitions = filter_tool_definitions_for_plan_mode(definitions, self.tool_registry)
-                else:
-                    definitions = filter_tool_definitions_for_default_mode(definitions, self.tool_registry)
-                tools_schema = filter_tool_definitions_for_model(definitions)
+                tools_schema = filter_tool_definitions_for_mode(
+                    self.tool_registry.get_all_definitions(),
+                    self.tool_registry,
+                    plan_mode_active=self.plan_mode_active(),
+                )
                 if not tools_schema:
                     tools_schema = None
 
