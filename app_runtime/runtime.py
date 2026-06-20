@@ -15,6 +15,7 @@ from plan_mode.agents import ExploreAgentTool, ForkExploreAgentsTool, PlanAgentT
 from plugin_runtime import PluginManager
 from sessions import NavigationPlan, SessionStore
 from sessions.summarizer import generate_branch_summary
+from skills.tools import SkillResourceTool
 from tooling.defaults import build_default_tool_runtime, format_tool_list
 
 from .agent_execution import run_agent_once as default_run_agent_once
@@ -146,6 +147,7 @@ class AppRuntime:
             )
         )
         runtime.event_bus.publish("runtime.created", cwd=project_cwd)
+        runtime.tool_runtime.registry.register(SkillResourceTool())
         return runtime
 
     def build_agent(

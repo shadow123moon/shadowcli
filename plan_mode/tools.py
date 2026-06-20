@@ -21,6 +21,7 @@ class ExitPlanModeTool(Tool):
     plan_mode = "control"
     plan_mode_only = True
     concurrency_safe = False
+    stop_after_call = True
     result_kind = "text"
     guidance = (
         "exit_plan_mode 工具用于在完成计划后主动提出退出 plan mode。"

@@ -22,6 +22,7 @@ def run_agent_once(
 ) -> str:
     try:
         context = runtime_context_builder.build(user_input) if runtime_context_builder is not None else ""
+        _set_agent_active_skill(agent, getattr(runtime_context_builder, "active_skill", None))
         return _run_agent_events(
             agent,
             user_input,
@@ -60,3 +61,9 @@ def _run_agent_events(
         agent.cancel()
         return "".join(content_parts) + "\n[已中止]"
     return "".join(content_parts)
+
+
+def _set_agent_active_skill(agent: ReactAgent, skill: Any | None) -> None:
+    setter = getattr(agent, "set_active_skill", None)
+    if callable(setter):
+        setter(skill)

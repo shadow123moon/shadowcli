@@ -17,6 +17,7 @@ from plan_mode import (
     persist_plan_mode,
     register_exit_plan_mode_tool,
 )
+from plan_mode.files import build_plan_handoff, compact_planning_history
 from sessions import NavigationPlan, RuntimeContextBuilder, SessionManager, SessionStore
 from sessions.types import DEFAULT_SESSION_TITLE
 from skills import (
@@ -117,6 +118,7 @@ class ReplRouter:
         self.session: SessionManager | None = None
         self.agent: ReactAgent | None = None
         self.runtime_context_builder: RuntimeContextBuilder | None = None
+        self._pending_plan_handoff: tuple[str, str] | None = None
 
     def route(self, line: str) -> bool:
         if not line:
@@ -314,8 +316,8 @@ class ReplRouter:
         if not plan_input:
             self.renderer.message("用法: /exit-plan <已批准的计划内容>")
             return
-        exit_plan_mode(self.app_runtime, self.session, plan_input)
-        self.renderer.message("已退出 plan mode，计划已记录。")
+        self._approve_plan(plan_input, defer_handoff=False)
+        self.renderer.message("已退出 plan mode，计划已记录，并已切换到实施上下文。")
 
     def _handle_plugins(self) -> None:
         plugins, diagnostics = self.app_runtime.plugin_status()
@@ -432,7 +434,41 @@ class ReplRouter:
         if not state.active:
             # Already exited or not in plan mode
             return
-        exit_plan_mode(self.app_runtime, self.session, plan)
+        self._approve_plan(plan, defer_handoff=self.run_interactive_in_worker)
+
+    def _approve_plan(self, plan: str, *, defer_handoff: bool) -> None:
+        if self.session is None:
+            return
+        state = exit_plan_mode(self.app_runtime, self.session, plan)
+        if defer_handoff:
+            self._pending_plan_handoff = (state.approved_plan, state.plan_file_path)
+            return
+        self._finalize_plan_handoff(state.approved_plan, state.plan_file_path)
+
+    def _flush_pending_plan_handoff(self, active_session: SessionManager) -> bool:
+        if self._pending_plan_handoff is None:
+            return False
+        plan, plan_file_path = self._pending_plan_handoff
+        self._pending_plan_handoff = None
+        if self.session is not active_session:
+            self.session = active_session
+        self._finalize_plan_handoff(plan, plan_file_path)
+        return True
+
+    def _finalize_plan_handoff(self, plan: str, plan_file_path: str) -> None:
+        if self.session is None:
+            return
+        handoff = build_plan_handoff(self.session, plan, plan_file_path)
+        entry = self.session.append_message(handoff.message)
+        compact_planning_history(
+            self.session,
+            entry,
+            plan=plan,
+            plan_file_path=plan_file_path,
+        )
+        self.runtime_context_builder = self.app_runtime.session_runtime.build_context(self.session)
+        if self.agent is not None and hasattr(self.agent, "replace_conversation_messages"):
+            self.agent.replace_conversation_messages(self.session.messages())
 
     def cancel_current(self, reason: str = "user_cancelled") -> bool:
         return self.app_runtime.task_runtime.cancel_current(reason=reason)
@@ -466,10 +502,12 @@ class ReplRouter:
             )
             if task.cancel.is_set() or not task_runtime.is_current(task.id):
                 task.cancel.set()
+                self._pending_plan_handoff = None
                 return
             buffer.commit(active_session)
             self.agent = worker_agent
-            self.runtime_context_builder = self.app_runtime.session_runtime.build_context(active_session)
+            if not self._flush_pending_plan_handoff(active_session):
+                self.runtime_context_builder = self.app_runtime.session_runtime.build_context(active_session)
 
         task_runtime.start_interactive(run)
 

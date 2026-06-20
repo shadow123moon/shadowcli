@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from textwrap import dedent
 from typing import Any
 
 
@@ -14,12 +15,13 @@ class PlanModeState:
     pre_mode: str | None = None
     task: str = ""
     approved_plan: str = ""
+    plan_file_path: str = ""
 
     @property
     def active(self) -> bool:
         return self.mode == PLAN_MODE
 
-    def enter(self, task: str) -> None:
+    def enter(self, task: str, *, plan_file_path: str = "") -> None:
         normalized = _normalize_text(task)
         if not normalized:
             raise ValueError("plan task is required")
@@ -28,9 +30,10 @@ class PlanModeState:
         self.mode = PLAN_MODE
         self.task = normalized
         self.approved_plan = ""
+        self.plan_file_path = _normalize_path(plan_file_path)
 
-    def exit(self, plan: str) -> None:
-        normalized = _normalize_text(plan)
+    def exit(self, plan: str, *, plan_file_path: str = "") -> None:
+        normalized = _normalize_multiline_text(plan)
         if not normalized:
             raise ValueError("approved plan is required")
 
@@ -39,6 +42,7 @@ class PlanModeState:
             "pre_mode": None,
             "task": "",
             "approved_plan": normalized,
+            "plan_file_path": _normalize_path(plan_file_path) or self.plan_file_path,
         })
 
     def reset(self) -> None:
@@ -46,6 +50,7 @@ class PlanModeState:
         self.pre_mode = None
         self.task = ""
         self.approved_plan = ""
+        self.plan_file_path = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +58,7 @@ class PlanModeState:
             "pre_mode": self.pre_mode,
             "task": self.task,
             "approved_plan": self.approved_plan,
+            "plan_file_path": self.plan_file_path,
         }
 
     @classmethod
@@ -67,7 +73,8 @@ class PlanModeState:
             mode=mode,
             pre_mode=str(pre_mode) if pre_mode else None,
             task=_normalize_text(data.get("task")),
-            approved_plan=_normalize_text(data.get("approved_plan")),
+            approved_plan=_normalize_multiline_text(data.get("approved_plan")),
+            plan_file_path=_normalize_path(data.get("plan_file_path")),
         )
 
 
@@ -77,3 +84,20 @@ def _normalize_text(value: str | None) -> str:
     if not isinstance(value, str):
         raise TypeError(f"Expected str or None, got {type(value).__name__}")
     return " ".join(value.strip().split())
+
+
+def _normalize_multiline_text(value: str | None) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str or None, got {type(value).__name__}")
+    lines = [line.rstrip() for line in dedent(value).strip().splitlines()]
+    return "\n".join(lines).strip()
+
+
+def _normalize_path(value: str | None) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"Expected str or None, got {type(value).__name__}")
+    return value.strip()

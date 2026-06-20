@@ -63,6 +63,7 @@ class AgentLoop:
         on_message_appended: MessageSink | None = None,
         use_tools: bool = True,
         plan_mode_active: Callable[[], bool] | None = None,
+        active_skill_provider: Callable[[], object | None] | None = None,
     ):
         self.name = name
         self.chat_stream_fn = chat
@@ -74,6 +75,7 @@ class AgentLoop:
         self.on_message_appended = on_message_appended
         self.use_tools = use_tools
         self.plan_mode_active = plan_mode_active or (lambda: False)
+        self.active_skill_provider = active_skill_provider or (lambda: None)
         self._system_prompt = system_prompt
         self._current_step_label: str | None = None
         self._ephemeral_context_index: int | None = None
@@ -319,6 +321,8 @@ class AgentLoop:
 
         yield StreamEvent("tool_result", {"name": tc["name"], "result": result})
         self._append_message(Message(role="tool", content=result, tool_call_id=tc["id"]))
+        if _tool_stops_after_call(tc["name"], self.tool_registry):
+            return "tool_complete"
         return None
 
     def _exec_one(self, tool_call) -> str:
@@ -333,6 +337,7 @@ class AgentLoop:
                 journal=self.journal,
                 turn_id=self.turn_id,
                 tool_call_id=tool_call.id,
+                active_skill=self.active_skill_provider(),
             )
             if _is_tool_error_result(result):
                 log.warning(
@@ -388,6 +393,14 @@ def _is_parallel_read_tool(name: str, registry) -> bool:
     except (AttributeError, KeyError):
         return False
     return getattr(tool, "effect", "write") == "read" and bool(getattr(tool, "concurrency_safe", False))
+
+
+def _tool_stops_after_call(name: str, registry) -> bool:
+    try:
+        tool = registry.get(name)
+    except (AttributeError, KeyError):
+        return False
+    return bool(getattr(tool, "stop_after_call", False))
 
 
 def _execute_registry_tool(registry, name: str, args: dict, **context) -> str:

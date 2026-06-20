@@ -34,6 +34,9 @@ from skills import (
     SkillSelector,
     auto_skill_candidates,
 )
+from skills.context import SkillContextBuilder
+from skills.resources import read_skill_resource
+from skills.tools import SkillResourceTool
 from plugin_runtime import PluginContributions, PluginManager, PluginStateStore
 from tooling import (
     BashTool,
@@ -449,7 +452,6 @@ class SkillRegistryTests(unittest.TestCase):
             skills = SkillRegistry(root, roots=[]).list()
 
         self.assertEqual(skills, [])
-
     def test_find_prefers_project_skill_when_names_collide(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -569,6 +571,63 @@ class SkillRegistryTests(unittest.TestCase):
         matches = [skill for skill in skills if skill.name == "brainstorming"]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].source, "superpowers")
+
+
+class SkillResourceTests(unittest.TestCase):
+    def test_skill_context_includes_resource_index_without_resource_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "frontend"
+            refs = skill_dir / "references"
+            scripts = skill_dir / "scripts"
+            refs.mkdir(parents=True)
+            scripts.mkdir()
+            (refs / "layout.md").write_text("layout secret", encoding="utf-8")
+            (scripts / "check.py").write_text("print('check')", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: frontend\n"
+                "description: Frontend work.\n"
+                "---\n"
+                "Read `references/layout.md` when layout details matter.\n",
+                encoding="utf-8",
+            )
+            registry = SkillRegistry(root, roots=[SkillRoot(source="project", path=root / ".agents" / "skills")])
+            loaded = registry.load("frontend")
+            base = RuntimeContextBuilder(session=type("Session", (), {"summary_text": lambda self: ""})(), long_term=[])
+
+            context = SkillContextBuilder(base=base, skill=loaded, arguments="").build("build UI")
+
+            self.assertIn("## Skill Resources", context)
+            self.assertIn("references/layout.md", context)
+            self.assertIn("scripts/check.py", context)
+            self.assertNotIn("layout secret", context)
+
+    def test_read_skill_resource_requires_active_skill_and_stays_inside_skill_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".agents" / "skills" / "frontend"
+            refs = skill_dir / "references"
+            refs.mkdir(parents=True)
+            (refs / "layout.md").write_text("layout rules", encoding="utf-8")
+            (root / "outside.md").write_text("outside", encoding="utf-8")
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: frontend\ndescription: Frontend work.\n---\n",
+                encoding="utf-8",
+            )
+            registry = SkillRegistry(root, roots=[SkillRoot(source="project", path=root / ".agents" / "skills")])
+            loaded = registry.load("frontend")
+
+            self.assertIn("layout rules", read_skill_resource(loaded, "references/layout.md"))
+            with self.assertRaises(PermissionError):
+                read_skill_resource(loaded, "../outside.md")
+
+            tool = SkillResourceTool()
+            no_skill_context = type("Context", (), {"active_skill": None})()
+            self.assertIn("没有激活的 skill", tool.execute_with_context({"path": "references/layout.md"}, no_skill_context))
+
+            active_context = type("Context", (), {"active_skill": loaded})()
+            self.assertIn("layout rules", tool.execute_with_context({"path": "references/layout.md"}, active_context))
 
 
 class PluginManagerTests(unittest.TestCase):
@@ -939,6 +998,40 @@ class ReactAgentTests(unittest.TestCase):
         self.assertEqual(result, "你好，我是 ReAct 助手")
         self.assertEqual(calls[0][0][-1].content, "你好")
         self.assertIsNone(calls[0][1])
+
+    def test_run_agent_once_sets_active_skill_from_context_builder(self):
+        from app_runtime.agent_execution import run_agent_once
+
+        active_skill = object()
+
+        class Builder:
+            def __init__(self, skill):
+                self.active_skill = skill
+
+            def build(self, query):
+                return f"context:{query}"
+
+        class Agent:
+            def __init__(self):
+                self.active_skills = []
+                self.inputs = []
+
+            def set_active_skill(self, skill):
+                self.active_skills.append(skill)
+
+            def events(self, user_input, context="", *, cancel=None, journal=None, turn_id=None):
+                self.inputs.append((user_input, context))
+                yield StreamEvent("done", {"reason": "finished"})
+
+            def cancel(self):
+                return None
+
+        agent = Agent()
+
+        run_agent_once(agent, "build UI", runtime_context_builder=Builder(active_skill), renderer=_CaptureRenderer())
+
+        self.assertEqual(agent.inputs, [("build UI", "context:build UI")])
+        self.assertEqual(agent.active_skills, [active_skill])
 
     def test_react_always_receives_tools_when_registry_has_definitions(self):
         calls = []

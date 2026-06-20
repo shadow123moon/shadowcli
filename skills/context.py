@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from .resources import format_skill_resource_index
 from .types import LoadedSkill
 
 
@@ -17,10 +18,15 @@ class SkillContextBuilder:
     skill: LoadedSkill
     arguments: str
 
+    @property
+    def active_skill(self) -> LoadedSkill:
+        return self.skill
+
     def build(self, query: str = "") -> str:
         parts = [
             self.base.build(query),
             format_skill_context(self.skill, self.arguments),
+            format_skill_resource_index(self.skill),
         ]
         return "\n\n".join(part for part in parts if part).rstrip()
 

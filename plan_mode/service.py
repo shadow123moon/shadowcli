@@ -5,6 +5,7 @@ from typing import Any
 
 from .state import PlanModeState
 from .tools import ExitPlanModeTool, PlanProposal
+from .files import plan_file_path_for_session, write_plan_file
 
 
 def ensure_plan_mode_state(runtime: Any) -> PlanModeState:
@@ -34,14 +35,15 @@ def persist_plan_mode(session: Any | None, state: PlanModeState) -> None:
 
 def enter_plan_mode(runtime: Any, session: Any | None, task: str) -> PlanModeState:
     state = ensure_plan_mode_state(runtime)
-    state.enter(task)
+    state.enter(task, plan_file_path=_session_plan_file_path(session))
     persist_plan_mode(session, state)
     return state
 
 
 def exit_plan_mode(runtime: Any, session: Any | None, plan: str) -> PlanModeState:
     state = ensure_plan_mode_state(runtime)
-    state.exit(plan)
+    plan_file_path = _write_approved_plan(session, plan)
+    state.exit(plan, plan_file_path=plan_file_path)
     persist_plan_mode(session, state)
     return state
 
@@ -57,3 +59,15 @@ def register_exit_plan_mode_tool(
     if register is None:
         return
     register(ExitPlanModeTool(confirm_plan=confirm_plan, on_plan_approved=on_plan_approved))
+
+
+def _session_plan_file_path(session: Any | None) -> str:
+    if session is None:
+        return ""
+    return str(plan_file_path_for_session(session))
+
+
+def _write_approved_plan(session: Any | None, plan: str) -> str:
+    if session is None:
+        return ""
+    return str(write_plan_file(session, plan))

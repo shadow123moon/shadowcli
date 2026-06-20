@@ -19,6 +19,7 @@ class ReactAgent:
     ):
         self.tool_registry = tool_registry
         self.plan_mode_active = plan_mode_active or (lambda: False)
+        self._active_skill = None
         self.conversation_messages = conversation_messages if conversation_messages is not None else []
         self.reactr = AgentLoop(
             name="react",
@@ -31,7 +32,11 @@ class ReactAgent:
             conversation_history=self.conversation_messages,
             on_message_appended=on_message_appended,
             plan_mode_active=self.plan_mode_active,
+            active_skill_provider=lambda: self._active_skill,
         )
+
+    def set_active_skill(self, skill) -> None:
+        self._active_skill = skill
 
     def events(self, user_input: str, context: str = "", *, cancel=None, journal=None, turn_id: str | None = None):
         self.reactr._system_prompt = _build_react_system_prompt(

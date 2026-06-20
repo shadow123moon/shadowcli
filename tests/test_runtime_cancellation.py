@@ -10,6 +10,8 @@ from app_runtime import AppRuntime
 from app_runtime.tasks import RuntimeJournal, StreamCaptureState, capture_stream_to_queue
 from cli_app.router import ReplRouter
 from llm import FunctionCall, Message, ToolCall
+from plan_mode import enter_plan_mode
+from plan_mode.files import PLAN_HANDOFF_METADATA_KEY
 from sessions import SessionStore
 from tooling import BashTool, Tool, ToolRegistry
 from tooling.runtime import ToolRuntime
@@ -110,6 +112,7 @@ class ToolExecutionContextTests(unittest.TestCase):
             runtime = ToolRuntime(registry)
             journal = RuntimeJournal(Path(tmp) / "runtime_journal.jsonl")
             cancel = threading.Event()
+            active_skill = object()
 
             result = runtime.execute(
                 "record_context",
@@ -118,6 +121,7 @@ class ToolExecutionContextTests(unittest.TestCase):
                 journal=journal,
                 turn_id="turn-1",
                 tool_call_id="tool-1",
+                active_skill=active_skill,
             )
             events = journal.load()
 
@@ -125,6 +129,7 @@ class ToolExecutionContextTests(unittest.TestCase):
         self.assertIs(tool.context.cancel, cancel)
         self.assertEqual(tool.context.turn_id, "turn-1")
         self.assertEqual(tool.context.tool_call_id, "tool-1")
+        self.assertIs(tool.context.active_skill, active_skill)
         self.assertEqual([event["type"] for event in events], ["tool_started", "tool_finished"])
 
     def test_agent_loop_passes_turn_context_to_tool_runtime(self):
@@ -135,6 +140,7 @@ class ToolExecutionContextTests(unittest.TestCase):
             runtime = ToolRuntime(registry)
             journal = RuntimeJournal(Path(tmp) / "runtime_journal.jsonl")
             cancel = threading.Event()
+            active_skill = object()
             loop = AgentLoop(
                 "react",
                 "system",
@@ -143,6 +149,7 @@ class ToolExecutionContextTests(unittest.TestCase):
                 cancel=cancel,
                 journal=journal,
                 turn_id="turn-1",
+                active_skill_provider=lambda: active_skill,
             )
 
             result = loop._exec_one(ToolCall(
@@ -156,6 +163,7 @@ class ToolExecutionContextTests(unittest.TestCase):
         self.assertIs(tool.context.cancel, cancel)
         self.assertEqual(tool.context.turn_id, "turn-1")
         self.assertEqual(tool.context.tool_call_id, "tool-1")
+        self.assertIs(tool.context.active_skill, active_skill)
         self.assertEqual([event["type"] for event in events], ["tool_started", "tool_finished"])
 
 
@@ -280,6 +288,58 @@ class RouterWorkerTests(unittest.TestCase):
             ("assistant", "reply"),
         ])
         self.assertTrue(any('"type": "turn"' in line for line in raw_lines))
+
+    def test_worker_exit_plan_mode_commits_planning_then_switches_to_handoff_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp) / "project"
+            cwd.mkdir()
+            runtime = AppRuntime.create(
+                cwd,
+                tool_runtime=ToolRuntime(ToolRegistry()),
+                session_store=SessionStore(Path(tmp) / "sessions"),
+                long_term_memory=[],
+            )
+            renderer = CaptureRenderer()
+            repl_router = ReplRouter(
+                app_runtime=runtime,
+                renderer=renderer,
+                confirm_plan=lambda proposal: True,
+                run_interactive_in_worker=True,
+            )
+            session, context_builder = repl_router.ensure_worker_session()
+            enter_plan_mode(runtime, session, "实现功能")
+            repl_router.runtime_context_builder = context_builder
+
+            runtime.build_agent = lambda *, conversation_messages=None, on_message_appended=None: BufferedAgent(
+                on_message_appended=on_message_appended
+            )
+
+            def run_agent_once(agent, user_input, **_kwargs):
+                agent.append("user", user_input)
+                result = runtime.tool_runtime.execute("exit_plan_mode", {"plan": "1. 改 A\n2. 验证"})
+                agent.append("assistant", result)
+                return result
+
+            runtime.run_agent_once = run_agent_once
+
+            repl_router.route("请制定计划")
+            task = runtime.task_runtime.current_interactive
+            self.assertIsNotNone(task)
+            task.thread.join(timeout=3)
+
+            messages = repl_router.session.messages()
+            all_entries = repl_router.session.all_entries()
+            plan_state = runtime.plan_mode_state
+            plan_path = Path(plan_state.plan_file_path)
+
+            self.assertFalse(plan_state.active)
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0].role, "user")
+            self.assertIn("请开始实施以下已批准计划", messages[0].content)
+            self.assertIn("1. 改 A", messages[0].content)
+            self.assertIn(PLAN_HANDOFF_METADATA_KEY, messages[0].metadata)
+            self.assertGreater(len(all_entries), 2)
 
     def test_cancelled_worker_turn_does_not_commit_buffer_and_writes_journal(self):
         with tempfile.TemporaryDirectory() as tmp:

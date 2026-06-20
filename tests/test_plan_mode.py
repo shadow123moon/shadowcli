@@ -18,6 +18,13 @@ from plan_mode import (
     plan_mode_context,
     register_plan_mode_guard,
 )
+from plan_mode.files import (
+    PLAN_HANDOFF_METADATA_KEY,
+    build_plan_handoff,
+    compact_planning_history,
+    plan_file_path_for_session,
+)
+from plan_mode.service import enter_plan_mode, exit_plan_mode
 from plan_mode.agents import ExploreAgentTool, ForkExploreAgentsTool, PlanAgentTool
 from plan_mode.state import _normalize_text
 from plan_mode.tools import ExitPlanModeTool, PlanProposal
@@ -35,15 +42,17 @@ class TestPlanModeState(unittest.TestCase):
         self.assertFalse(state.active)
         self.assertEqual(state.task, "")
         self.assertEqual(state.approved_plan, "")
+        self.assertEqual(state.plan_file_path, "")
         self.assertIsNone(state.pre_mode)
 
     def test_enter_plan_mode_sets_task_and_active(self):
         state = PlanModeState()
-        state.enter("实现用户认证")
+        state.enter("实现用户认证", plan_file_path="plans/demo.md")
         self.assertEqual(state.mode, PLAN_MODE)
         self.assertTrue(state.active)
         self.assertEqual(state.task, "实现用户认证")
         self.assertEqual(state.approved_plan, "")
+        self.assertEqual(state.plan_file_path, "plans/demo.md")
         self.assertEqual(state.pre_mode, DEFAULT_MODE)
 
     def test_enter_normalizes_whitespace(self):
@@ -72,7 +81,7 @@ class TestPlanModeState(unittest.TestCase):
         state = PlanModeState()
         state.enter("task")
         state.exit("  计划  \n  内容  ")
-        self.assertEqual(state.approved_plan, "计划 内容")
+        self.assertEqual(state.approved_plan, "计划\n内容")
 
     def test_exit_rejects_empty_plan(self):
         state = PlanModeState()
@@ -91,6 +100,7 @@ class TestPlanModeState(unittest.TestCase):
         self.assertFalse(state.active)
         self.assertEqual(state.task, "")
         self.assertEqual(state.approved_plan, "")
+        self.assertEqual(state.plan_file_path, "")
         self.assertIsNone(state.pre_mode)
 
     def test_to_dict_serializes_all_fields(self):
@@ -101,6 +111,7 @@ class TestPlanModeState(unittest.TestCase):
         self.assertEqual(data["task"], "implement auth")
         self.assertEqual(data["pre_mode"], DEFAULT_MODE)
         self.assertEqual(data["approved_plan"], "")
+        self.assertEqual(data["plan_file_path"], "")
 
     def test_from_dict_deserializes_correctly(self):
         data = {
@@ -108,12 +119,14 @@ class TestPlanModeState(unittest.TestCase):
             "task": "refactor code",
             "pre_mode": DEFAULT_MODE,
             "approved_plan": "",
+            "plan_file_path": "plans/demo.md",
         }
         state = PlanModeState.from_dict(data)
         self.assertEqual(state.mode, PLAN_MODE)
         self.assertTrue(state.active)
         self.assertEqual(state.task, "refactor code")
         self.assertEqual(state.pre_mode, DEFAULT_MODE)
+        self.assertEqual(state.plan_file_path, "plans/demo.md")
 
     def test_from_dict_handles_none(self):
         state = PlanModeState.from_dict(None)
@@ -133,7 +146,7 @@ class TestPlanModeState(unittest.TestCase):
         }
         state = PlanModeState.from_dict(data)
         self.assertEqual(state.task, "task text")
-        self.assertEqual(state.approved_plan, "plan text")
+        self.assertEqual(state.approved_plan, "plan\ntext")
 
 
 class TestPlanModeContext(unittest.TestCase):
@@ -146,9 +159,10 @@ class TestPlanModeContext(unittest.TestCase):
         self.assertIn("## 当前模式: Plan Mode", context)
         self.assertIn("任务: 设计 API", context)
         self.assertIn("只读计划模式", context)
-        self.assertIn("read/ls/grep/find/web", context)
-        self.assertIn("git status/git diff", context)
-        self.assertIn("write/edit/propose_memory", context)
+        self.assertIn("## Plan Workflow", context)
+        self.assertIn("### Phase 1: 理解与探索", context)
+        self.assertIn("fork_explore_agents", context)
+        self.assertIn("### Phase 5: 请求批准", context)
 
     def test_approved_plan_returns_plan_content(self):
         state = PlanModeState()
@@ -600,6 +614,46 @@ class TestPlanModePersistence(unittest.TestCase):
             self.assertFalse(restored_state.active)
             self.assertEqual(restored_state.approved_plan, "已批准的计划内容")
 
+    def test_enter_and_exit_write_plan_file_path_to_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(root=Path(tmpdir))
+            cwd = Path(tmpdir) / "project"
+            cwd.mkdir()
+            session = store.create(cwd)
+            runtime = type("Runtime", (), {})()
+
+            active = enter_plan_mode(runtime, session, "实现功能")
+            expected_path = plan_file_path_for_session(session)
+            self.assertEqual(active.plan_file_path, str(expected_path))
+
+            exited = exit_plan_mode(runtime, session, "1. 改 A\n2. 跑测试")
+
+            self.assertEqual(exited.plan_file_path, str(expected_path))
+            self.assertEqual(expected_path.read_text(encoding="utf-8"), "# Approved Plan\n\n1. 改 A\n2. 跑测试\n")
+            restored = store.open(cwd, session.meta.session_id)
+            restored_state = PlanModeState.from_dict(restored.meta.plan_mode)
+            self.assertEqual(restored_state.plan_file_path, str(expected_path))
+
+    def test_plan_handoff_compacts_planning_history_from_runtime_messages(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(root=Path(tmpdir))
+            cwd = Path(tmpdir) / "project"
+            cwd.mkdir()
+            session = store.create(cwd)
+            session.append_message(Message(role="user", content="/plan 实现功能"))
+            session.append_message(Message(role="assistant", content="我先探索"))
+
+            handoff = build_plan_handoff(session, "1. 改 A\n2. 验证", "plans/demo.md")
+            entry = session.append_message(handoff.message)
+            compact_planning_history(session, entry, plan=handoff.plan, plan_file_path=handoff.plan_file_path)
+
+            runtime_messages = session.messages()
+            self.assertEqual(len(runtime_messages), 1)
+            self.assertIn("请开始实施以下已批准计划", runtime_messages[0].content)
+            self.assertIn("1. 改 A", runtime_messages[0].content)
+            self.assertIn(PLAN_HANDOFF_METADATA_KEY, runtime_messages[0].metadata)
+            self.assertIn("Plan mode 阶段已结束", session.summary_text())
+
 
 class TestRuntimeContextBuilderPlanIntegration(unittest.TestCase):
     """Test plan mode context injection in RuntimeContextBuilder."""
@@ -757,6 +811,46 @@ class TestExitPlanModeTool(unittest.TestCase):
         self.assertEqual(tool.category, "plan")
         self.assertTrue(tool.approval_required)
         self.assertIn("plan", tool.description)
+
+
+class TestPlanModeAgentLoop(unittest.TestCase):
+    def test_exit_plan_mode_tool_stops_current_react_turn_after_tool_result(self):
+        registry = ToolRegistry()
+        registry.register(ExitPlanModeTool(
+            confirm_plan=lambda proposal: True,
+            on_plan_approved=lambda plan: None,
+        ))
+        calls = 0
+
+        def fake_stream(_messages, tools=None, cancel=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield StreamEvent("tool_call", {
+                    "id": "call-1",
+                    "type": "function",
+                    "name": "exit_plan_mode",
+                    "arguments": '{"plan": "1. implement"}',
+                })
+                yield StreamEvent("done", None)
+                return
+            yield StreamEvent("content", "should not continue")
+            yield StreamEvent("done", None)
+
+        loop = AgentLoop(
+            name="react",
+            system_prompt="system",
+            chat=fake_stream,
+            tool_registry=registry,
+            plan_mode_active=lambda: True,
+        )
+
+        events = list(loop.execute(Message(role="user", content="plan")))
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(events[-1].type, "done")
+        self.assertEqual(events[-1].data["reason"], "tool_complete")
+        self.assertTrue(any(event.type == "tool_result" for event in events))
 
 
 if __name__ == "__main__":

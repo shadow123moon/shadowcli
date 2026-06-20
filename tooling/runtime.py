@@ -22,6 +22,7 @@ class ToolExecutionContext:
     journal: Any | None = None
     turn_id: str | None = None
     tool_call_id: str | None = None
+    active_skill: Any | None = None
 
 
 class ToolRuntime:
@@ -41,6 +42,7 @@ class ToolRuntime:
         journal: Any | None = None,
         turn_id: str | None = None,
         tool_call_id: str | None = None,
+        active_skill: Any | None = None,
     ) -> str:
         tool = self.registry.get(name)
         for hook in self.before_execute_hooks:
@@ -56,6 +58,7 @@ class ToolRuntime:
             journal=journal,
             turn_id=turn_id,
             tool_call_id=tool_call_id,
+            active_skill=active_skill,
         )
         started = False
         if journal is not None and getattr(tool, "effect", "write") != "read":
